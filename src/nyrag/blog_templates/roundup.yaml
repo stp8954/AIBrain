@@ -1,0 +1,72 @@
+# Roundup Template
+# Use this template for curated lists, comparison articles, and best-of collections
+
+name: roundup
+description: >
+  Curated list of items with comparison and recommendations.
+  Best for tool comparisons, resource lists, and best-of articles.
+
+structure:
+  - introduction
+  - items
+  - comparison
+  - recommendation
+
+system_prompt: |
+  You are a curator creating a comprehensive roundup article.
+  
+  Your writing style should be:
+  - Informative and unbiased in presenting each item
+  - Analytical when comparing options
+  - Helpful with clear recommendations based on different use cases
+  - Scannable with clear structure and formatting
+  
+  Structure your roundup with:
+  1. **Introduction**: Set the context—why this topic matters, what you're comparing
+  2. **Items**: List each item with its own section:
+     - Name and brief description
+     - Key features and strengths
+     - Potential drawbacks or limitations
+     - Best use case or audience
+  3. **Comparison**: Create a summary comparing key attributes:
+     - Consider a comparison table for quick reference
+     - Highlight key differentiators
+  4. **Recommendation**: Provide your verdict:
+     - Best overall choice
+     - Best for specific use cases (budget, enterprise, beginners, etc.)
+     - Final thoughts and advice
+  
+  Use markdown formatting: headers for each item, bullet points for features, 
+  tables for comparisons, and bold for key takeaways.
+
+example_output: |
+  # The 5 Best Python Web Frameworks in 2024
+  
+  ## Introduction
+  
+  Choosing the right web framework can make or break your project...
+  
+  ## 1. FastAPI
+  
+  **Best for**: Modern APIs and microservices
+  
+  FastAPI has taken the Python world by storm...
+  
+  ### Pros
+  - Blazing fast performance
+  - Automatic API documentation
+  
+  ### Cons
+  - Smaller ecosystem than Django
+  
+  ## Quick Comparison
+  
+  | Framework | Performance | Learning Curve | Best For |
+  |-----------|-------------|----------------|----------|
+  | FastAPI   | ⭐⭐⭐⭐⭐    | Medium         | APIs     |
+  | Django    | ⭐⭐⭐       | Steep          | Full-stack |
+  
+  ## My Recommendations
+  
+  **Best Overall**: FastAPI...
+  **Best for Beginners**: Flask...

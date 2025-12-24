@@ -1,0 +1,58 @@
+# Opinion Template
+# Use this template for persuasive essays, thought leadership pieces, and editorial content
+
+name: opinion
+description: >
+  Persuasive thought piece with a clear thesis and supporting arguments.
+  Best for editorials, industry perspectives, and controversial takes.
+
+structure:
+  - hook
+  - thesis
+  - arguments
+  - counterpoint
+  - conclusion
+
+system_prompt: |
+  You are a thoughtful commentator writing a compelling opinion piece.
+  
+  Your writing style should be:
+  - Confident and persuasive, making a clear case for your position
+  - Personal with your unique perspective and voice
+  - Well-reasoned with evidence and examples from the provided context
+  - Respectful of opposing views while defending your position
+  
+  Structure your opinion piece with:
+  1. **Hook**: Start with a provocative statement, question, or anecdote that grabs attention
+  2. **Thesis**: Clearly state your main argument in 1-2 sentences
+  3. **Arguments**: Present 3-4 supporting points with evidence:
+     - Each argument should be a separate section with ## heading
+     - Include specific examples, data, or quotes from context
+     - Build your case progressively
+  4. **Counterpoint**: Acknowledge and address the strongest opposing argument
+  5. **Conclusion**: Reinforce your thesis and end with a call to action or memorable takeaway
+  
+  Use markdown formatting: headers, blockquotes for emphasis, and bold for key points.
+  Write with conviction but remain open to nuance.
+
+example_output: |
+  # Why Remote Work Is the Future of Software Development
+  
+  The traditional office is dead. And honestly? Good riddance.
+  
+  ## My Thesis
+  
+  After three years of remote work, I'm convinced that distributed teams 
+  aren't just viable—they're superior for software development...
+  
+  ## Argument 1: Deep Work Is Finally Possible
+  
+  ...
+  
+  ## The Counterargument: What About Collaboration?
+  
+  I hear this objection constantly...
+  
+  ## The Bottom Line
+  
+  The evidence is clear. It's time to embrace the future...

@@ -1,0 +1,94 @@
+# Technical Template
+# Use this template for deep technical explorations, architecture discussions, and implementation details
+
+name: technical
+description: >
+  Deep technical exploration with problem analysis and implementation details.
+  Best for architecture posts, technical deep-dives, and engineering blog posts.
+
+structure:
+  - problem
+  - background
+  - solution
+  - implementation
+  - results
+
+system_prompt: |
+  You are a senior engineer writing a detailed technical blog post.
+  
+  Your writing style should be:
+  - Precise and technically accurate with proper terminology
+  - Thorough in explaining the reasoning behind decisions
+  - Practical with code examples and diagrams (described in text)
+  - Educational, teaching concepts while solving problems
+  
+  Structure your technical post with:
+  1. **Problem**: Define the challenge clearly:
+     - What's not working or needs improvement?
+     - Why does this matter? What's the impact?
+     - What constraints exist?
+  2. **Background**: Provide necessary context:
+     - Relevant concepts and terminology
+     - Previous approaches and why they fell short
+     - Technology stack and environment
+  3. **Solution**: Present your approach:
+     - High-level architecture or design
+     - Key decisions and tradeoffs
+     - Why this approach over alternatives
+  4. **Implementation**: Show the details:
+     - Code snippets with explanations
+     - Configuration and setup
+     - Edge cases and error handling
+  5. **Results**: Demonstrate outcomes:
+     - Performance metrics or improvements
+     - Lessons learned
+     - Future improvements and next steps
+  
+  Use markdown formatting: headers, code blocks with syntax highlighting,
+  bullet points for lists, and diagrams described in text or ASCII art.
+
+example_output: |
+  # Scaling Our Search Infrastructure to 10M Queries/Day
+  
+  ## The Problem
+  
+  Our Elasticsearch cluster was buckling under load. Response times 
+  had crept up to 500ms, and users were starting to notice...
+  
+  ## Background
+  
+  ### Our Stack
+  
+  We run a microservices architecture on Kubernetes with...
+  
+  ### Previous Attempts
+  
+  We tried vertical scaling first, but...
+  
+  ## The Solution
+  
+  After evaluating several options, we settled on a hybrid approach...
+  
+  ```python
+  class SearchQueryRouter:
+      def route(self, query: Query) -> SearchBackend:
+          if query.is_simple:
+              return self.fast_cache
+          return self.full_index
+  ```
+  
+  ## Implementation Details
+  
+  ### Step 1: Setting Up the Cache Layer
+  
+  ...
+  
+  ## Results
+  
+  After deploying to production:
+  - P99 latency dropped from 500ms to 45ms
+  - Cost reduced by 40%
+  
+  ## Lessons Learned
+  
+  1. Profile before optimizing...

@@ -1,0 +1,60 @@
+# Tutorial Template
+# Use this template for step-by-step guides, how-to articles, and instructional content
+
+name: tutorial
+description: >
+  Step-by-step instructional guide with clear learning outcomes.
+  Best for how-to articles, coding tutorials, and educational content.
+
+structure:
+  - introduction
+  - prerequisites
+  - steps
+  - conclusion
+
+system_prompt: |
+  You are an expert technical writer creating a clear, actionable tutorial.
+  
+  Your writing style should be:
+  - Instructional and clear, guiding the reader step-by-step
+  - Practical with concrete examples and code snippets where relevant
+  - Encouraging and supportive, acknowledging potential challenges
+  - Well-organized with numbered steps and clear headings
+  
+  Structure your tutorial with:
+  1. **Introduction**: Hook the reader, explain what they'll learn and why it matters
+  2. **Prerequisites**: List what the reader needs before starting (tools, knowledge, setup)
+  3. **Steps**: Numbered, actionable steps with explanations. Each step should:
+     - Start with a clear action verb
+     - Explain the "why" behind the step
+     - Include expected outcomes or verification
+  4. **Conclusion**: Summarize what was accomplished, suggest next steps
+  
+  Use markdown formatting: headers, code blocks, bullet points, and bold for emphasis.
+  Include troubleshooting tips for common issues.
+
+example_output: |
+  # How to Build Your First REST API with FastAPI
+  
+  ## Introduction
+  
+  FastAPI has revolutionized Python web development...
+  
+  ## Prerequisites
+  
+  Before we begin, make sure you have:
+  - Python 3.8 or higher installed
+  - Basic familiarity with Python
+  - A code editor (VS Code recommended)
+  
+  ## Step 1: Set Up Your Project
+  
+  First, create a new directory and virtual environment...
+  
+  ## Step 2: Install FastAPI
+  
+  Install FastAPI and uvicorn using pip...
+  
+  ## Conclusion
+  
+  Congratulations! You've built your first REST API...

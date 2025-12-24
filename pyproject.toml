@@ -1,0 +1,77 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nyrag"
+version = "0.0.7"
+description = "nyrag"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+authors = [
+    { name = "abhishek" }
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+keywords = ["nyrag"]
+dependencies = [
+    "loguru==0.7.3",
+    "rich>=13.0.0",
+    "fastapi==0.117.1",
+    "uvicorn==0.37.0",
+    "pyyaml>=6.0.0",
+    "markitdown>=0.1.4",
+    "scrapy>=2.13.4",
+    "beautifulsoup4>=4.14.3",
+    "pyvespa>=0.62.0",
+    "tqdm>=4.67.1",
+    "brotli>=1.2.0",
+    "sentence-transformers>=5.1.2",
+    "httpx>=0.27.0",
+    "jinja2>=3.1.0",
+    "openai>=2.9.0",
+    "vespacli>=8.620.35",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0.0",
+    "isort>=5.13.0",
+    "flake8>=7.0.0",
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+nyrag = "nyrag.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/abhishekkrthakur/nyrag"
+Issues = "https://github.com/abhishekkrthakur/nyrag/issues"
+
+[tool.setuptools.package-data]
+nyrag = ["static/*", "templates/*"]
+
+[tool.isort]
+ensure_newline_before_comments = true
+force_grid_wrap = 0
+include_trailing_comma = true
+line_length = 119
+lines_after_imports = 2
+multi_line_output = 3
+use_parentheses = true
+
+[tool.flake8]
+ignore = ["E203", "E501", "W503"]
+max-line-length = 119
+per-file-ignores = { "__init__.py" = ["F401", "E402"] }
+exclude = [".git", ".venv", "__pycache__", "dist", "build"]
+
+[tool.pytest.ini_options]
+addopts = "--maxfail=1 --disable-warnings"
+testpaths = ["tests"]

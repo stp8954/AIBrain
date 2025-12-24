@@ -1,0 +1,475 @@
+const chatEl = document.getElementById("chat");
+const inputEl = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+const statsEl = document.getElementById("corpus-stats");
+
+// Settings Modal Elements
+const settingsBtn = document.getElementById("settings-btn");
+const modal = document.getElementById("settings-modal");
+const closeBtn = document.querySelector(".close-btn");
+const saveBtn = document.getElementById("save-settings");
+const hitsInput = document.getElementById("hits");
+const kInput = document.getElementById("k");
+const queryKInput = document.getElementById("query_k");
+
+// Settings Modal Logic
+settingsBtn.onclick = () => modal.style.display = "block";
+closeBtn.onclick = () => modal.style.display = "none";
+saveBtn.onclick = () => modal.style.display = "none";
+window.onclick = (event) => {
+  if (event.target === modal) {
+    modal.style.display = "none";
+  }
+};
+
+// Maintain conversation history
+let conversationHistory = [];
+
+// Active blog generation jobs for polling
+let activeBlogJobs = new Map();
+
+// Available blog templates (loaded on page load)
+let availableTemplates = [];
+let selectedTemplate = null;
+
+async function loadBlogTemplates() {
+  try {
+    const res = await fetch("/api/blog/templates");
+    if (res.ok) {
+      availableTemplates = await res.json();
+      console.log("Loaded blog templates:", availableTemplates);
+    }
+  } catch (e) {
+    console.warn("Failed to load blog templates:", e);
+  }
+}
+
+function createTemplateSelector(onSelect) {
+  const container = document.createElement("div");
+  container.className = "template-selector";
+  
+  const header = document.createElement("div");
+  header.className = "template-selector-header";
+  header.innerHTML = "📝 Choose a blog template:";
+  container.appendChild(header);
+  
+  const buttons = document.createElement("div");
+  buttons.className = "template-buttons";
+  
+  // Add default option
+  const defaultBtn = document.createElement("button");
+  defaultBtn.className = "template-btn" + (selectedTemplate === null ? " selected" : "");
+  defaultBtn.innerHTML = "<span class=\"template-name\">Default</span><span class=\"template-desc\">Standard Substack style</span>";
+  defaultBtn.onclick = () => {
+    selectedTemplate = null;
+    container.querySelectorAll(".template-btn").forEach(b => b.classList.remove("selected"));
+    defaultBtn.classList.add("selected");
+    onSelect(null);
+  };
+  buttons.appendChild(defaultBtn);
+  
+  // Add template options
+  availableTemplates.forEach(template => {
+    const btn = document.createElement("button");
+    btn.className = "template-btn" + (selectedTemplate === template.name ? " selected" : "");
+    btn.innerHTML = `<span class="template-name">${template.name}</span><span class="template-desc">${template.description || ""}</span>`;
+    btn.onclick = () => {
+      selectedTemplate = template.name;
+      container.querySelectorAll(".template-btn").forEach(b => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      onSelect(template.name);
+    };
+    buttons.appendChild(btn);
+  });
+  
+  container.appendChild(buttons);
+  return container;
+}
+
+// Load templates on page load
+loadBlogTemplates();
+
+async function refreshStats() {
+  if (!statsEl) return;
+  try {
+    const res = await fetch("/stats", { method: "GET" });
+    if (!res.ok) {
+      statsEl.textContent = "";
+      return;
+    }
+    const data = await res.json();
+    const docs = data?.documents;
+    const chunks = data?.chunks;
+    if (typeof docs === "number" && typeof chunks === "number") {
+      statsEl.textContent = `Indexed: ${docs} documents • ${chunks} chunks`;
+    } else if (typeof docs === "number") {
+      statsEl.textContent = `Indexed: ${docs} documents`;
+    } else {
+      statsEl.textContent = "";
+    }
+  } catch (e) {
+    statsEl.textContent = "";
+  }
+}
+
+refreshStats();
+
+// Blog job status polling
+async function pollBlogJobStatus(jobId, statusEl) {
+  const maxPolls = 60; // 2 minutes max at 2s intervals
+  let polls = 0;
+
+  const poll = async () => {
+    if (polls >= maxPolls) {
+      statusEl.innerHTML = `<span class="blog-status error">⚠️ Job timed out. <a href="/api/jobs/${jobId}" target="_blank">Check status</a></span>`;
+      activeBlogJobs.delete(jobId);
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) {
+        statusEl.innerHTML = `<span class="blog-status error">⚠️ Failed to get job status</span>`;
+        activeBlogJobs.delete(jobId);
+        return;
+      }
+
+      const job = await res.json();
+      polls++;
+
+      if (job.status === "running" || job.status === "queued") {
+        statusEl.innerHTML = `<span class="blog-status pending">⏳ ${job.status === "running" ? "Generating" : "Queued"}... (${polls * 2}s)</span>`;
+        setTimeout(poll, 2000);
+      } else if (job.status === "complete") {
+        const blogId = job.result?.blog_id;
+        statusEl.innerHTML = `
+          <span class="blog-status success">✅ Blog generated!</span>
+          <div class="blog-actions">
+            <a href="/api/blog/${blogId}" target="_blank" class="blog-btn">📄 View</a>
+            <a href="/api/blog/${blogId}/download" class="blog-btn">⬇️ Download</a>
+          </div>
+        `;
+        activeBlogJobs.delete(jobId);
+      } else if (job.status === "failed") {
+        statusEl.innerHTML = `<span class="blog-status error">❌ Failed: ${job.error || "Unknown error"}</span>`;
+        activeBlogJobs.delete(jobId);
+      } else if (job.status === "cancelled") {
+        statusEl.innerHTML = `<span class="blog-status error">🚫 Cancelled</span>`;
+        activeBlogJobs.delete(jobId);
+      }
+    } catch (e) {
+      statusEl.innerHTML = `<span class="blog-status error">⚠️ Error: ${e.message}</span>`;
+      activeBlogJobs.delete(jobId);
+    }
+  };
+
+  poll();
+}
+
+function createBlogJobTracker(jobId, topic, template) {
+  const container = document.createElement("div");
+  container.className = "blog-job-tracker";
+  const templateLabel = template ? ` (${template})` : "";
+  container.innerHTML = `
+    <div class="blog-job-header">📝 Blog: ${topic}${templateLabel}</div>
+    <div class="blog-job-status" id="blog-status-${jobId}">
+      <span class="blog-status pending">⏳ Starting...</span>
+    </div>
+  `;
+
+  const statusEl = container.querySelector(`#blog-status-${jobId}`);
+  activeBlogJobs.set(jobId, statusEl);
+  pollBlogJobStatus(jobId, statusEl);
+
+  return container;
+}
+
+// Auto-resize textarea
+inputEl.addEventListener('input', function () {
+  this.style.height = 'auto';
+  this.style.height = (this.scrollHeight) + 'px';
+  if (this.value === '') {
+    this.style.height = 'auto';
+  }
+});
+
+function renderMarkdown(el, text) {
+  if (window.marked) {
+    const html = window.marked.parse(text || "", {
+      breaks: true,
+      mangle: false,
+      headerIds: false,
+    });
+    el.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+  } else {
+    el.textContent = text;
+  }
+}
+
+function append(role, text) {
+  // Remove welcome message if it exists
+  const welcome = document.querySelector('.welcome-message');
+  if (welcome) welcome.remove();
+
+  const div = document.createElement("div");
+  div.className = role === "You" ? "msg user-msg" : "msg assistant-msg";
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+
+  if (role === "You") {
+    bubble.textContent = text;
+  } else {
+    // For assistant, we might render markdown later, but initial text is fine
+    bubble.innerHTML = `<div class="assistant-text">${text}</div>`;
+  }
+
+  div.appendChild(bubble);
+  chatEl.appendChild(div);
+
+  // Scroll to bottom
+  scrollToBottom();
+}
+
+function scrollToBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function appendChunksCollapsible(chunks) {
+  if (!chunks || !chunks.length) return;
+
+  // Find the last assistant message to append chunks to
+  const msgs = document.querySelectorAll('.msg.assistant-msg');
+  const lastMsg = msgs[msgs.length - 1];
+  if (!lastMsg) return;
+
+  const bubble = lastMsg.querySelector('.bubble');
+
+  const wrap = document.createElement("details");
+  wrap.className = "chunks";
+  wrap.open = false;
+
+  const listHtml = chunks
+    .map(
+      (c) =>
+        `<details class="chunk-item">
+          <summary>${c.loc} <span class="score">(${c.score ? c.score.toFixed(2) : '0.00'})</span></summary>
+          <div class="chunk-content">${c.chunk}</div>
+        </details>`
+    )
+    .join("");
+
+  wrap.innerHTML = `<summary>Relevant sources (${chunks.length})</summary><div class="chunk-list">${listHtml}</div>`;
+
+  bubble.appendChild(wrap);
+  scrollToBottom();
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  append("You", text);
+  inputEl.value = "";
+  inputEl.style.height = 'auto'; // Reset height
+
+  // Create assistant message placeholder
+  const assistantDiv = document.createElement("div");
+  assistantDiv.className = "msg assistant-msg";
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+
+  const meta = document.createElement("div");
+  meta.className = "assistant-meta";
+
+  const assistantText = document.createElement("div");
+  assistantText.className = "assistant-text";
+  // Add typing indicator
+  assistantText.innerHTML = '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
+
+  bubble.appendChild(meta);
+  bubble.appendChild(assistantText);
+  assistantDiv.appendChild(bubble);
+  chatEl.appendChild(assistantDiv);
+  scrollToBottom();
+
+  let assistantMd = "";
+
+  try {
+    const res = await fetch("/chat-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        history: conversationHistory,
+        hits: parseInt(hitsInput.value) || 5,
+        k: parseInt(kInput.value) || 3,
+        query_k: parseInt(queryKInput.value) || 3
+      })
+    });
+
+    if(!res.ok || !res.body) {
+      const err = await res.text();
+      assistantText.textContent = `Error: ${err}`;
+      return;
+    }
+
+    const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const chunksCache = [];
+  const queriesCache = [];
+  let thinkingContent = "";
+  let thinkingEl = null;
+  let thinkingBody = null;
+  let statusEl = null;
+  let isAnswerPhase = false;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+    for (const part of parts) {
+      if (!part.startsWith("data:")) continue;
+      const data = part.replace("data:", "").trim();
+      if (!data) continue;
+      try {
+        const evt = JSON.parse(data);
+        if (evt.type === "status") {
+          if (statusEl) statusEl.remove();
+          statusEl = document.createElement("div");
+          statusEl.className = "status-line";
+          statusEl.textContent = evt.payload;
+          meta.appendChild(statusEl);
+          scrollToBottom();
+          if (evt.payload.includes("Generating answer")) {
+            isAnswerPhase = true;
+          }
+        } else if (evt.type === "thinking") {
+          if (!isAnswerPhase) continue;
+
+          if (!thinkingEl) {
+            thinkingEl = document.createElement("div");
+            thinkingEl.className = "thinking-section";
+
+            const header = document.createElement("div");
+            header.className = "thinking-header";
+            header.innerHTML = `
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                Thinking Process
+              `;
+            header.onclick = () => {
+              thinkingBody.classList.toggle("collapsed");
+            };
+
+            thinkingBody = document.createElement("div");
+            thinkingBody.className = "thinking-content";
+
+            thinkingEl.appendChild(header);
+            thinkingEl.appendChild(thinkingBody);
+
+            // Insert before assistantText
+            bubble.insertBefore(thinkingEl, assistantText);
+          }
+          thinkingContent += evt.payload;
+          thinkingBody.textContent = thinkingContent;
+          scrollToBottom();
+        } else if (evt.type === "queries") {
+          queriesCache.splice(0, queriesCache.length, ...evt.payload);
+
+          const details = document.createElement("details");
+          details.className = "meta-details";
+          const summary = document.createElement("summary");
+          summary.textContent = `Queries (${evt.payload.length})`;
+          details.appendChild(summary);
+
+          const ul = document.createElement("ul");
+          evt.payload.forEach((q) => {
+            const li = document.createElement("li");
+            li.textContent = q;
+            ul.appendChild(li);
+          });
+          details.appendChild(ul);
+          meta.appendChild(details);
+          scrollToBottom();
+
+          // Reset thinking for next phase
+          thinkingEl = null;
+          thinkingContent = "";
+        } else if (evt.type === "chunks") {
+          chunksCache.push(...evt.payload);
+
+          // Display Context/Sources (locs only)
+          const locs = [...new Set(evt.payload.map(c => c.loc))];
+
+          const details = document.createElement("details");
+          details.className = "meta-details";
+          const summary = document.createElement("summary");
+          summary.textContent = `Sources (${locs.length})`;
+          details.appendChild(summary);
+
+          const ul = document.createElement("ul");
+          locs.forEach((loc) => {
+            const li = document.createElement("li");
+            li.textContent = loc;
+            ul.appendChild(li);
+          });
+          details.appendChild(ul);
+          meta.appendChild(details);
+          scrollToBottom();
+
+          // Reset thinking for next phase
+          thinkingEl = null;
+          thinkingContent = "";
+        } else if (evt.type === "blog_job") {
+          // Blog generation job started
+          const { job_id, topic, template } = evt.payload;
+          const tracker = createBlogJobTracker(job_id, topic, template || selectedTemplate);
+          bubble.appendChild(tracker);
+          scrollToBottom();
+        } else if (evt.type === "blog_template_select") {
+          // Show template selector for blog generation
+          const { topic } = evt.payload;
+          const selector = createTemplateSelector((templateName) => {
+            selectedTemplate = templateName;
+          });
+          bubble.appendChild(selector);
+          scrollToBottom();
+        } else if (evt.type === "token") {
+          assistantMd += evt.payload;
+          renderMarkdown(assistantText, assistantMd);
+          scrollToBottom();
+        } else if (evt.type === "done") {
+          if (statusEl) statusEl.remove();
+          if (evt.payload && typeof evt.payload === "string") {
+            assistantMd = evt.payload;
+          }
+          renderMarkdown(assistantText, assistantMd);
+          if (chunksCache.length) appendChunksCollapsible(chunksCache);
+          scrollToBottom();
+
+          // Add this exchange to conversation history
+          conversationHistory.push({ role: "user", content: text });
+          conversationHistory.push({ role: "assistant", content: assistantMd });
+          refreshStats();
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+  }
+} catch (e) {
+  assistantText.textContent = e?.message || "Request failed";
+}
+}
+
+sendBtn.addEventListener("click", send);
+inputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
