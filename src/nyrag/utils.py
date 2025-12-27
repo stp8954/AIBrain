@@ -141,3 +141,113 @@ def chunks(text: str, chunk_size: int, overlap: int) -> List[str]:
         start += chunk_size - overlap
 
     return chunk_list
+
+
+# =============================================================================
+# Uploads Directory Management
+# =============================================================================
+
+DEFAULT_UPLOADS_DIR = Path("data/uploads")
+MAX_UPLOAD_SIZE_MB = 50
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024  # 50MB
+
+
+def get_uploads_dir(base_path: Optional[Path] = None) -> Path:
+    """Get the uploads directory path, creating it if necessary.
+
+    Args:
+        base_path: Optional base path. If not provided, uses DEFAULT_UPLOADS_DIR.
+
+    Returns:
+        Path to the uploads directory.
+    """
+    uploads_dir = base_path or DEFAULT_UPLOADS_DIR
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return uploads_dir
+
+
+def validate_file_size(file_size: int) -> bool:
+    """Validate that a file is within the size limit.
+
+    Args:
+        file_size: File size in bytes.
+
+    Returns:
+        True if file is within size limit.
+
+    Raises:
+        ValueError: If file exceeds size limit.
+    """
+    if file_size > MAX_UPLOAD_SIZE_BYTES:
+        raise ValueError(
+            f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds maximum " f"allowed size ({MAX_UPLOAD_SIZE_MB}MB)"
+        )
+    return True
+
+
+def get_file_type_from_extension(filename: str) -> Optional[str]:
+    """Get the data source type from a file extension.
+
+    Args:
+        filename: The filename to check.
+
+    Returns:
+        Data source type ('pdf', 'markdown', 'txt') or None if unsupported.
+    """
+    ext = Path(filename).suffix.lower()
+    type_map = {
+        ".pdf": "pdf",
+        ".md": "markdown",
+        ".markdown": "markdown",
+        ".txt": "txt",
+        ".text": "txt",
+    }
+    return type_map.get(ext)
+
+
+def is_supported_file_type(filename: str) -> bool:
+    """Check if a file type is supported for upload.
+
+    Args:
+        filename: The filename to check.
+
+    Returns:
+        True if file type is supported.
+    """
+    return get_file_type_from_extension(filename) is not None
+
+
+def generate_safe_filename(original_name: str, unique_id: str) -> str:
+    """Generate a safe filename with unique ID prefix.
+
+    Args:
+        original_name: Original filename.
+        unique_id: Unique identifier to prefix.
+
+    Returns:
+        Safe filename with ID prefix.
+    """
+    # Clean the original name
+    safe_name = "".join(c if c.isalnum() or c in ".-_" else "_" for c in original_name)
+    # Limit length
+    if len(safe_name) > 100:
+        ext = Path(safe_name).suffix
+        safe_name = safe_name[: 100 - len(ext)] + ext
+    return f"{unique_id}_{safe_name}"
+
+
+def cleanup_upload(file_path: Path) -> bool:
+    """Remove an uploaded file.
+
+    Args:
+        file_path: Path to the file to remove.
+
+    Returns:
+        True if file was removed or didn't exist.
+    """
+    try:
+        if file_path.exists():
+            file_path.unlink()
+        return True
+    except OSError:
+        return False

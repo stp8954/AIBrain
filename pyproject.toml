@@ -37,6 +37,9 @@ dependencies = [
     "jinja2>=3.1.0",
     "openai>=2.9.0",
     "vespacli>=8.620.35",
+    "aiosqlite>=0.20.0",
+    "aiofiles>=24.1.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]

@@ -1,89 +1,85 @@
-<!DOCTYPE html>
-<html lang="en">
+{% extends "base.html" %}
 
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Notes - NyRAG</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-  <!-- EasyMDE Markdown Editor -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
-  <!-- Inherit base styles from chat.css for CSS variables -->
-  <link rel="stylesheet" href="/static/chat.css" />
-  <!-- Notes-specific styles -->
-  <link rel="stylesheet" href="/static/notes.css" />
-</head>
+{% block title %}Notes - NyRAG{% endblock %}
 
-<body>
-  <div class="notes-layout">
-    <!-- Sidebar with notes list -->
-    <aside class="notes-sidebar">
-      <div class="sidebar-header">
-        <h2>My Notes</h2>
-        <button id="new-note-btn" class="btn btn-primary btn-small">+ New</button>
-      </div>
-      <div id="notes-list" class="notes-list">
-        <!-- Notes list will be populated by JS -->
-      </div>
-    </aside>
+{% block extra_css %}
+<!-- EasyMDE Markdown Editor -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
+<!-- Notes-specific styles -->
+<link rel="stylesheet" href="/static/notes.css" />
+{% endblock %}
 
-    <!-- Main content area -->
-    <main class="notes-main">
-      <div class="notes-container">
-        <!-- Header -->
-        <header class="notes-header">
-          <h1>📝 Notes</h1>
-          <div class="notes-header-actions">
-            <a href="/" class="nav-link">← Back to Chat</a>
-          </div>
-        </header>
+{% block secondary_sidebar %}
+<aside class="notes-sidebar">
+  <div class="sidebar-section">
+    <div class="sidebar-section-header">
+      <h3>My Notes</h3>
+      <button id="new-note-btn" class="btn btn-sm btn-primary" title="New Note">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        New
+      </button>
+    </div>
+    <div id="notes-list" class="notes-list">
+      <!-- Notes list will be populated by JS -->
+    </div>
+  </div>
+</aside>
+{% endblock %}
 
-        <!-- Status Message -->
-        <div id="status-message" class="status-message" style="display: none;"></div>
+{% block content %}
+<div class="notes-page">
+  <!-- Notes Header -->
+  <header class="notes-header">
+    <div class="notes-header-content">
+      <h1 id="notes-title" class="notes-title">New Note</h1>
+    </div>
+  </header>
 
-        <!-- Editor Container -->
-        <div class="editor-container">
-          <!-- Title Input -->
-          <input 
-            type="text" 
-            id="note-title" 
-            class="note-title-input" 
-            placeholder="Note title..."
-            autocomplete="off"
-          />
+  <!-- Status Message -->
+  <div id="status-message" class="status-message" style="display: none;"></div>
 
-          <!-- Tags -->
-          <div id="tags-container" class="tags-container">
-            <input 
-              type="text" 
-              id="tag-input" 
-              class="tag-input" 
-              placeholder="Add tags (press Enter)..."
-            />
-          </div>
+  <!-- Editor Container -->
+  <div class="editor-container">
+    <!-- Title Input -->
+    <input 
+      type="text" 
+      id="note-title" 
+      class="note-title-input" 
+      placeholder="Note title..."
+      autocomplete="off"
+    />
 
-          <!-- Markdown Editor -->
-          <textarea id="note-content"></textarea>
-        </div>
+    <!-- Tags -->
+    <div id="tags-container" class="tags-container">
+      <input 
+        type="text" 
+        id="tag-input" 
+        class="tag-input" 
+        placeholder="Add tags (press Enter)..."
+      />
+    </div>
 
-        <!-- Actions -->
-        <div class="notes-actions">
-          <button id="delete-btn" class="btn btn-danger">Delete</button>
-          <div class="notes-actions-right">
-            <button class="btn btn-secondary" onclick="clearEditor()">Cancel</button>
-            <button id="save-btn" class="btn btn-primary">Save Note</button>
-          </div>
-        </div>
-      </div>
-    </main>
+    <!-- Markdown Editor -->
+    <textarea id="note-content"></textarea>
   </div>
 
-  <!-- EasyMDE -->
-  <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
-  <!-- Notes JS -->
-  <script src="/static/notes.js"></script>
-</body>
+  <!-- Actions -->
+  <div class="notes-actions">
+    <button id="delete-btn" class="btn btn-danger">Delete</button>
+    <div class="notes-actions-right">
+      <button class="btn btn-ghost" onclick="clearEditor()">Cancel</button>
+      <button id="save-btn" class="btn btn-primary">Save Note</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
 
-</html>
+{% block extra_js %}
+<!-- EasyMDE -->
+<script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
+<!-- Notes JS -->
+<script src="/static/notes.js"></script>
+{% endblock %}

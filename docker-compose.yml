@@ -1,0 +1,23 @@
+services:
+  vespa:
+    image: vespaengine/vespa:latest
+    container_name: vespa
+    hostname: vespa-container
+    ports:
+      - "8080:8080"  # HTTP API
+      - "19071:19071"  # Config server
+    volumes:
+      - vespa-data:/opt/vespa/var
+    environment:
+      - VESPA_CONFIGSERVERS=vespa-container
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/state/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+
+volumes:
+  vespa-data:
+    driver: local

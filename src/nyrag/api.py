@@ -1,34 +1,28 @@
 import asyncio
 import json
 import os
-import re
 from functools import partial
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse, FileResponse
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
+from nyrag.blog import BlogPost, generate_blog_task, get_blog, get_blog_path
 from nyrag.config import Config
+from nyrag.jobs import JobStatus, get_job_queue
 from nyrag.logger import get_logger
-from nyrag.blog import (
-    list_templates as blog_list_templates,
-    generate_blog_task,
-    get_blog,
-    get_blog_path,
-)
-from nyrag.notes import (
-    list_notes as notes_list_notes,
-    get_note as notes_get_note,
-    update_note as notes_update_note,
-    delete_note as notes_delete_note,
-)
-from nyrag.jobs import get_job_queue
+from nyrag.notes import Note, get_note, save_image, save_note, search_notes
 from nyrag.utils import (
     DEFAULT_EMBEDDING_MODEL,
     get_vespa_tls_config,
@@ -129,6 +123,51 @@ base_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(base_dir / "templates"))
 app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
 
+# Mount assets directory for serving note images
+# Assets are stored in output/<project>/assets/
+_assets_base = Path("output")
+if not _assets_base.exists():
+    _assets_base.mkdir(parents=True, exist_ok=True)
+
+
+@app.on_event("startup")
+async def init_database_on_startup():
+    """Initialize the SQLite database on startup."""
+    from nyrag.database import init_database
+
+    try:
+        await init_database()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+
+
+@app.on_event("startup")
+async def mount_assets_on_startup():
+    """Mount assets directories dynamically on startup."""
+    config_path = os.getenv("NYRAG_CONFIG")
+    if config_path and Path(config_path).exists():
+        from nyrag.config import Config
+
+        cfg = Config.from_yaml(config_path)
+        assets_dir = cfg.get_output_path() / "assets"
+        if assets_dir.exists():
+            app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+            logger.info(f"Mounted assets directory: {assets_dir}")
+
+
+def _get_config_for_notes() -> "Config":
+    """Load config for notes operations."""
+    config_path = os.getenv("NYRAG_CONFIG")
+    if config_path and Path(config_path).exists():
+        return Config.from_yaml(config_path)
+    # Create minimal config for notes if no config file exists
+    return Config(
+        name="default",
+        mode="web",
+        start_loc="http://localhost",
+    )
+
 
 def _deep_find_numeric_field(obj: Any, key: str) -> Optional[float]:
     if isinstance(obj, dict):
@@ -192,6 +231,673 @@ async def stats() -> Dict[str, Any]:
         "documents": doc_count,
         "chunks": chunk_count,
     }
+
+
+@app.get("/api/status")
+async def get_system_status() -> Dict[str, Any]:
+    """Get system status including Vespa and database availability.
+
+    Returns comprehensive status for the UI to display system health.
+    """
+    from nyrag.database import check_database_available, get_database_stats
+    from nyrag.schema import SystemStatusResponse
+
+    # Check Vespa availability
+    vespa_available = False
+    vespa_docs = 0
+    vespa_chunks = 0
+
+    try:
+        res = vespa_app.query(
+            body={"yql": "select * from sources * where true", "hits": 0},
+            schema=settings["schema_name"],
+        )
+        total = res.json.get("root", {}).get("fields", {}).get("totalCount")
+        if isinstance(total, int):
+            vespa_docs = total
+            vespa_available = True
+        elif isinstance(total, str) and total.isdigit():
+            vespa_docs = int(total)
+            vespa_available = True
+
+        # Get chunk count
+        yql = "select * from sources * where true | all(group(1) each(output(sum(chunk_count))))"
+        res = vespa_app.query(body={"yql": yql, "hits": 0}, schema=settings["schema_name"])
+        sum_value = _deep_find_numeric_field(res.json, "sum(chunk_count)")
+        if sum_value is not None:
+            vespa_chunks = int(sum_value)
+    except Exception as e:
+        logger.debug(f"Vespa not available: {e}")
+        vespa_available = False
+
+    # Check database availability and get stats
+    db_available = await check_database_available()
+    db_stats = await get_database_stats() if db_available else {}
+
+    # Get running and queued jobs count
+    running_jobs = db_stats.get("running_jobs", 0)
+    queued_jobs = db_stats.get("jobs", {}).get("by_status", {}).get("queued", 0)
+
+    # Get counts for data sources and conversations
+    total_data_sources = db_stats.get("sources", {}).get("total", 0)
+    total_conversations = db_stats.get("conversations", 0)
+
+    return SystemStatusResponse(
+        vespa_available=vespa_available,
+        database_available=db_available,
+        running_jobs=running_jobs,
+        queued_jobs=queued_jobs,
+        total_data_sources=total_data_sources,
+        total_conversations=total_conversations,
+    ).model_dump()
+
+
+# =============================================================================
+# Data Sources Endpoints
+# =============================================================================
+
+
+@app.get("/api/sources")
+async def list_sources(
+    type: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List all data sources with optional filtering.
+
+    Args:
+        type: Filter by source type (url, pdf, markdown, txt)
+        status: Filter by status (pending, processing, indexed, failed)
+        limit: Maximum number of results (default 50, max 100)
+        offset: Pagination offset
+
+    Returns:
+        Dictionary with items list and total count
+    """
+    from nyrag.sources import list_data_sources
+
+    sources, total = await list_data_sources(
+        source_type=type,
+        status=status,
+        limit=limit,
+        offset=offset,
+    )
+
+    return {
+        "items": [s.model_dump() for s in sources],
+        "total": total,
+    }
+
+
+@app.get("/api/sources/{source_id}")
+async def get_source(source_id: str) -> Dict[str, Any]:
+    """Get details of a specific data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Data source details
+
+    Raises:
+        HTTPException: 404 if source not found
+    """
+    from nyrag.sources import get_data_source
+
+    source = await get_data_source(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Data source not found: {source_id}")
+
+    return source.model_dump()
+
+
+@app.post("/api/sources/url", status_code=201)
+async def add_url_source(request: Request) -> Dict[str, Any]:
+    """Add a URL for crawling.
+
+    Request body:
+        url: URL to crawl
+        name: Optional display name
+
+    Returns:
+        Created source and job information
+
+    Raises:
+        HTTPException: 400 for invalid URL, 503 if Vespa unavailable
+    """
+    from nyrag.sources import create_job, create_source_from_url, start_job
+
+    body = await request.json()
+    url = body.get("url")
+    name = body.get("name")
+
+    if not url:
+        raise HTTPException(status_code=400, detail="URL is required")
+
+    try:
+        source = await create_source_from_url(url, name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Create and start a crawl job for the new source
+    try:
+        job = await create_job(source.id, "crawl")
+        job_id = job["id"]
+        # Start the job in the background
+        asyncio.create_task(start_job(job_id))
+    except Exception as e:
+        logger.warning(f"Failed to create/start job for source {source.id}: {e}")
+        job_id = None
+
+    return {
+        "source": source.model_dump(),
+        "job_id": job_id,
+        "message": "Source created successfully",
+    }
+
+
+@app.post("/api/sources/files", status_code=201)
+async def upload_files(files: List[UploadFile] = File(...)) -> Dict[str, Any]:
+    """Upload files for processing.
+
+    Args:
+        files: List of files to upload (max 50MB each)
+
+    Returns:
+        List of created sources with job information
+
+    Raises:
+        HTTPException: 400 for invalid files, 413 for files too large
+    """
+    from nyrag.sources import create_job, create_source_from_file, start_job
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    results = []
+    errors = []
+
+    for file in files:
+        try:
+            content = await file.read()
+            source = await create_source_from_file(file.filename or "unknown", content)
+
+            # Create and start a processing job for the file
+            try:
+                job = await create_job(source.id, "process_file")
+                job_id = job["id"]
+                # Start the job in the background
+                asyncio.create_task(start_job(job_id))
+            except Exception as e:
+                logger.warning(f"Failed to create/start job for source {source.id}: {e}")
+                job_id = None
+
+            results.append({
+                "source": source.model_dump(),
+                "job_id": job_id,
+            })
+        except ValueError as e:
+            errors.append({
+                "filename": file.filename,
+                "error": str(e),
+            })
+
+    if errors and not results:
+        raise HTTPException(status_code=400, detail={"message": "All files failed", "errors": errors})
+
+    return {
+        "sources": results,
+        "errors": errors if errors else None,
+        "message": f"Created {len(results)} source(s)",
+    }
+
+
+@app.delete("/api/sources/{source_id}")
+async def delete_source(source_id: str) -> Dict[str, Any]:
+    """Delete a data source and its associated chunks.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Deletion confirmation with chunks deleted count
+
+    Raises:
+        HTTPException: 404 if source not found
+    """
+    from nyrag.sources import delete_data_source
+
+    success, chunks_deleted = await delete_data_source(source_id)
+
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Data source not found: {source_id}")
+
+    return {
+        "message": "Source deleted successfully",
+        "chunks_deleted": chunks_deleted,
+    }
+
+
+# =============================================================================
+# Jobs API Endpoints
+# =============================================================================
+
+
+@app.get("/api/jobs")
+async def list_jobs_endpoint(
+    status: Optional[str] = None,
+    source_id: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List background jobs with optional filtering.
+
+    Args:
+        status: Filter by job status (queued, running, completed, failed, cancelled)
+        source_id: Filter by data source ID
+        limit: Maximum number of results (default 50, max 100)
+        offset: Pagination offset
+
+    Returns:
+        Dict with 'jobs' list and 'total' count
+    """
+    from nyrag.sources import list_jobs
+
+    jobs, total = await list_jobs(
+        status=status,
+        source_id=source_id,
+        limit=limit,
+        offset=offset,
+    )
+
+    return {
+        "jobs": jobs,
+        "total": total,
+        "limit": min(max(limit, 1), 100),
+        "offset": max(offset, 0),
+    }
+
+
+@app.get("/api/jobs/{job_id}")
+async def get_job_endpoint(job_id: str) -> Dict[str, Any]:
+    """Get details of a specific job.
+
+    Args:
+        job_id: UUID of the job
+
+    Returns:
+        Job details including logs
+
+    Raises:
+        HTTPException: 404 if job not found
+    """
+    from nyrag.sources import get_job
+
+    job = await get_job(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    return job
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def cancel_job_endpoint(job_id: str) -> Dict[str, Any]:
+    """Cancel a queued or running job.
+
+    Args:
+        job_id: UUID of the job
+
+    Returns:
+        Cancellation status message
+
+    Raises:
+        HTTPException: 404 if job not found, 400 if cannot be cancelled
+    """
+    from nyrag.sources import cancel_job
+
+    success, message = await cancel_job(job_id)
+
+    if not success:
+        if "not found" in message.lower():
+            raise HTTPException(status_code=404, detail=message)
+        raise HTTPException(status_code=400, detail=message)
+
+    return {"message": message, "job_id": job_id}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job_endpoint(job_id: str) -> Dict[str, Any]:
+    """Retry a failed job.
+
+    Args:
+        job_id: UUID of the failed job
+
+    Returns:
+        New job details
+
+    Raises:
+        HTTPException: 404 if job not found, 400 if cannot be retried
+    """
+    from nyrag.sources import get_job, retry_job, start_job
+
+    success, result = await retry_job(job_id)
+
+    if not success:
+        if "not found" in result.lower():
+            raise HTTPException(status_code=404, detail=result)
+        raise HTTPException(status_code=400, detail=result)
+
+    # Try to start the new job
+    new_job_id = result
+    await start_job(new_job_id)
+
+    # Return the new job details
+    new_job = await get_job(new_job_id)
+    return {
+        "message": "Job retry initiated",
+        "new_job": new_job,
+    }
+
+
+@app.get("/api/jobs/{job_id}/stream")
+async def stream_job_progress(job_id: str) -> StreamingResponse:
+    """Stream real-time job progress updates via SSE.
+
+    Args:
+        job_id: UUID of the job
+
+    Returns:
+        Server-Sent Events stream with progress updates
+    """
+    import asyncio
+
+    from nyrag.sources import get_job
+
+    async def event_generator():
+        """Generate SSE events for job progress."""
+        last_progress = -1
+        last_status = None
+
+        while True:
+            job = await get_job(job_id)
+
+            if not job:
+                yield f"event: error\ndata: {{\"error\": \"Job not found\"}}\n\n"
+                break
+
+            # Send update if progress or status changed
+            current_progress = job.get("progress", 0)
+            current_status = job.get("status")
+
+            if current_progress != last_progress or current_status != last_status:
+                import json
+
+                data = json.dumps({
+                    "id": job_id,
+                    "status": current_status,
+                    "progress": current_progress,
+                    "current_task": job.get("current_task"),
+                    "error_message": job.get("error_message"),
+                })
+                yield f"data: {data}\n\n"
+                last_progress = current_progress
+                last_status = current_status
+
+            # Stop streaming if job is complete
+            if current_status in ("completed", "failed", "cancelled"):
+                yield f"event: complete\ndata: {{\"status\": \"{current_status}\"}}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@app.post("/api/sources/{source_id}/sync")
+async def sync_source(source_id: str) -> Dict[str, Any]:
+    """Re-index a data source by creating a new sync job.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        New job details
+
+    Raises:
+        HTTPException: 404 if source not found
+    """
+    from nyrag.sources import create_job, get_data_source, get_job, start_job
+
+    # Verify source exists
+    source = await get_data_source(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Data source not found: {source_id}")
+
+    # Create a sync job
+    job = await create_job(source_id, "sync")
+
+    # Try to start the job
+    started = await start_job(job["id"])
+
+    # Return job details
+    job_details = await get_job(job["id"])
+    return {
+        "message": "Sync job created",
+        "started": started,
+        "job": job_details,
+    }
+
+
+@app.get("/api/sources/{source_id}/progress")
+async def stream_source_progress(source_id: str) -> StreamingResponse:
+    """Stream real-time progress for the active job on a source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Server-Sent Events stream with progress updates
+    """
+    import asyncio
+
+    from nyrag.sources import get_data_source, list_jobs
+
+    async def event_generator():
+        """Generate SSE events for source processing progress."""
+        while True:
+            # Check if source exists
+            source = await get_data_source(source_id)
+            if not source:
+                yield f"event: error\ndata: {{\"error\": \"Source not found\"}}\n\n"
+                break
+
+            # Find active job for this source
+            jobs, _ = await list_jobs(source_id=source_id, limit=1)
+            if not jobs:
+                yield f"event: no_job\ndata: {{\"message\": \"No active job\"}}\n\n"
+                break
+
+            job = jobs[0]
+            import json
+
+            data = json.dumps({
+                "job_id": job.get("id"),
+                "status": job.get("status"),
+                "progress": job.get("progress", 0),
+                "current_task": job.get("current_task"),
+                "error_message": job.get("error_message"),
+            })
+            yield f"data: {data}\n\n"
+
+            # Stop if job is complete
+            if job.get("status") in ("completed", "failed", "cancelled"):
+                yield f"event: complete\ndata: {{\"status\": \"{job.get('status')}\"}}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# =============================================================================
+# Conversations API Endpoints
+# =============================================================================
+
+
+class CreateConversationRequest(BaseModel):
+    """Request model for creating a conversation."""
+
+    title: Optional[str] = Field(None, description="Optional conversation title")
+
+
+class AddMessageRequest(BaseModel):
+    """Request model for adding a message to a conversation."""
+
+    role: str = Field(..., description="Message role: 'user' or 'assistant'")
+    content: str = Field(..., description="Message content")
+
+
+@app.get("/api/conversations")
+async def list_conversations_endpoint(
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """List conversations ordered by most recent activity.
+
+    Args:
+        limit: Maximum number of results (default 50, max 100)
+        offset: Pagination offset
+
+    Returns:
+        Dict with 'conversations' list and 'total' count
+    """
+    from nyrag.sources import list_conversations
+
+    conversations, total = await list_conversations(limit=limit, offset=offset)
+
+    return {
+        "conversations": conversations,
+        "total": total,
+        "limit": min(max(limit, 1), 100),
+        "offset": max(offset, 0),
+    }
+
+
+@app.post("/api/conversations", status_code=201)
+async def create_conversation_endpoint(
+    request: Optional[CreateConversationRequest] = None,
+) -> Dict[str, Any]:
+    """Create a new conversation.
+
+    Args:
+        request: Optional request with title
+
+    Returns:
+        Created conversation details
+    """
+    from nyrag.sources import create_conversation
+
+    title = request.title if request else None
+    conversation = await create_conversation(title=title)
+
+    return conversation
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation_endpoint(conversation_id: str) -> Dict[str, Any]:
+    """Get a conversation with all its messages.
+
+    Args:
+        conversation_id: UUID of the conversation
+
+    Returns:
+        Conversation details with messages array
+
+    Raises:
+        HTTPException: 404 if conversation not found
+    """
+    from nyrag.sources import get_conversation_with_messages
+
+    conversation = await get_conversation_with_messages(conversation_id)
+
+    if not conversation:
+        raise HTTPException(status_code=404, detail=f"Conversation not found: {conversation_id}")
+
+    return conversation
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation_endpoint(conversation_id: str) -> Dict[str, Any]:
+    """Delete a conversation and all its messages.
+
+    Args:
+        conversation_id: UUID of the conversation
+
+    Returns:
+        Deletion confirmation
+
+    Raises:
+        HTTPException: 404 if conversation not found
+    """
+    from nyrag.sources import delete_conversation
+
+    success = await delete_conversation(conversation_id)
+
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Conversation not found: {conversation_id}")
+
+    return {"message": "Conversation deleted successfully", "id": conversation_id}
+
+
+@app.post("/api/conversations/{conversation_id}/messages", status_code=201)
+async def add_message_endpoint(
+    conversation_id: str,
+    request: AddMessageRequest,
+) -> Dict[str, Any]:
+    """Add a message to a conversation.
+
+    Args:
+        conversation_id: UUID of the conversation
+        request: Message data (role and content)
+
+    Returns:
+        Created message details
+
+    Raises:
+        HTTPException: 400 if invalid role, 404 if conversation not found
+    """
+    from nyrag.sources import add_message
+
+    if request.role not in ("user", "assistant"):
+        raise HTTPException(status_code=400, detail="Role must be 'user' or 'assistant'")
+
+    try:
+        message = await add_message(
+            conversation_id=conversation_id,
+            role=request.role,
+            content=request.content,
+        )
+        return message
+    except ValueError as e:
+        if "not found" in str(e).lower():
+            raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/search")
@@ -286,9 +992,44 @@ def _fetch_chunks(query: str, hits: int, k: int) -> List[Dict[str, Any]]:
     return chunks
 
 
+def _fetch_notes_as_chunks(query: str, hits: int) -> List[Dict[str, Any]]:
+    """Fetch notes matching the query and return them as chunks for RAG context.
+
+    This integrates notes with the main search results, treating each note's
+    content as a chunk for the RAG pipeline.
+    """
+    try:
+        config = _get_config_for_notes()
+        notes = search_notes(query, config, limit=hits)
+
+        chunks: List[Dict[str, Any]] = []
+        for note in notes:
+            # Use note title as location, content as chunk
+            chunks.append(
+                {
+                    "loc": f"note:{note.id}:{note.title}",
+                    "chunk": note.content[:2000],  # Limit chunk size
+                    "score": 0.5,  # Default score for notes
+                    "hit_score": 0.5,
+                    "source_query": query,
+                    "source_type": "note",
+                }
+            )
+        return chunks
+    except Exception as e:
+        logger.warning(f"Failed to fetch notes: {e}")
+        return []
+
+
 async def _fetch_chunks_async(query: str, hits: int, k: int) -> List[Dict[str, Any]]:
+    """Fetch chunks from both main schema and notes schema."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, partial(_fetch_chunks, query, hits, k))
+    # Fetch from main schema
+    main_chunks = await loop.run_in_executor(None, partial(_fetch_chunks, query, hits, k))
+    # Also fetch from notes
+    note_chunks = await loop.run_in_executor(None, partial(_fetch_notes_as_chunks, query, min(hits, 3)))
+    # Combine and return
+    return main_chunks + note_chunks
 
 
 def _get_openrouter_client() -> AsyncOpenAI:
@@ -621,79 +1362,48 @@ async def chat(req: ChatRequest) -> Dict[str, Any]:
     return {"answer": answer, "chunks": chunks, "queries": queries}
 
 
-# Blog generation intent patterns
-BLOG_INTENT_PATTERNS = [
-    r"\b(generate|create|write|draft|make)\s+(a\s+)?(blog|post|article)\b",
-    r"\b(blog|post|article)\s+(about|on|for)\b",
-    r"\bturn\s+(this|these|my)\s+(notes?|content)?\s*into\s+(a\s+)?(blog|post|article)\b",
-]
-
-
-def _detect_blog_intent(message: str) -> Optional[str]:
-    """Detect if the user wants to generate a blog post.
-
-    Args:
-        message: User's chat message.
-
-    Returns:
-        Extracted topic if blog intent detected, None otherwise.
-    """
-    message_lower = message.lower()
-
-    for pattern in BLOG_INTENT_PATTERNS:
-        if re.search(pattern, message_lower):
-            # Extract topic: everything after the pattern or after "about/on"
-            topic_match = re.search(r"(?:about|on|for|:)\s+(.+?)(?:\.|$)", message, re.IGNORECASE)
-            if topic_match:
-                return topic_match.group(1).strip()
-            # Fallback: use the whole message as topic
-            # Remove the command part
-            cleaned = re.sub(r"^(please\s+)?(generate|create|write|draft|make)\s+(a\s+)?(blog|post|article)\s*(about|on|for)?\s*", "", message, flags=re.IGNORECASE)
-            return cleaned.strip() if cleaned.strip() else message
-
-    return None
-
-
 @app.post("/chat-stream")
 async def chat_stream(req: ChatRequest):
     model_id = req.model or os.getenv("OPENROUTER_MODEL")
 
     # Check for blog generation intent
-    blog_topic = _detect_blog_intent(req.message)
+    blog_topic = detect_blog_intent(req.message)
 
     async def event_stream():
-        # If blog intent detected, trigger blog generation
+        # If blog intent detected, handle blog generation flow
         if blog_topic:
-            yield f"data: {json.dumps({'type': 'status', 'payload': 'Blog generation requested...'})}\n\n"
-
-            config = _get_config()
-            if not config:
-                no_cfg_msg = "Sorry, I cannot generate blogs without a config. Please set NYRAG_CONFIG."
-                yield f"data: {json.dumps({'type': 'token', 'payload': no_cfg_msg})}\n\n"
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
+            yield f"data: {json.dumps({'type': 'status', 'payload': 'Blog generation request detected...'})}\n\n"
 
             try:
+                config = _get_config_for_notes()
                 job_queue = get_job_queue()
-                job_id = await job_queue.submit(
+
+                # Submit blog generation job
+                job_id = job_queue.submit(
                     job_type="blog_generation",
-                    coro=generate_blog_task(
-                        topic=blog_topic,
-                        config=config,
-                        template=None,  # Could parse template from message
-                        instructions=None,
-                    ),
+                    task_fn=generate_blog_task,
+                    topic=blog_topic,
+                    config=config,
+                    template=None,
+                    instructions=None,
                 )
 
-                msg = f"I'm generating a blog post about **{blog_topic}**. This may take a minute or two..."
-                yield f"data: {json.dumps({'type': 'token', 'payload': msg})}\n\n"
-                blog_job_evt = {"type": "blog_job", "payload": {"job_id": job_id, "topic": blog_topic}}
-                yield f"data: {json.dumps(blog_job_evt)}\n\n"
+                blog_job_data = {"type": "blog_job", "payload": {"job_id": job_id, "topic": blog_topic}}
+                yield f"data: {json.dumps(blog_job_data)}\n\n"
+
+                response_text = (
+                    f"📝 **Blog Generation Started**\n\n"
+                    f"I've started generating a blog post about: **{blog_topic}**\n\n"
+                    f"Job ID: `{job_id}`\n\n"
+                    f"The blog is being generated in the background. "
+                    f"You can check its status or download it once complete."
+                )
+                yield f"data: {json.dumps({'type': 'token', 'payload': response_text})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
+
             except Exception as e:
-                logger.error(f"Failed to start blog generation: {e}")
-                err_msg = f"Sorry, I encountered an error starting blog generation: {str(e)}"
+                err_msg = f"Failed to start blog generation: {str(e)}"
                 yield f"data: {json.dumps({'type': 'token', 'payload': err_msg})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
@@ -735,310 +1445,366 @@ async def chat_stream(req: ChatRequest):
 
 
 @app.get("/", response_class=HTMLResponse)
+async def root_ui(request: Request) -> HTMLResponse:
+    """Render the chat UI at root path."""
+    return templates.TemplateResponse("chat_new.html", {"request": request, "active_page": "chat"})
+
+
+@app.get("/chat", response_class=HTMLResponse)
 async def chat_ui(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse("chat.html", {"request": request})
+    """Render the chat UI."""
+    return templates.TemplateResponse("chat_new.html", {"request": request, "active_page": "chat"})
 
 
-@app.get("/notes", response_class=HTMLResponse)
-async def notes_ui(request: Request) -> HTMLResponse:
-    """Render the notes editor UI."""
-    return templates.TemplateResponse("notes.html", {"request": request})
+# =============================================================================
+# Notes API Endpoints (Phase 3 - US1)
+# =============================================================================
 
 
-@app.get("/api/blog/templates")
-async def get_blog_templates() -> List[Dict[str, Any]]:
-    """Return list of available blog templates with descriptions.
-
-    Returns:
-        List of template info dicts with 'name', 'description', and 'structure' keys.
-    """
-    # Load config if available
-    config_path = os.getenv("NYRAG_CONFIG")
-    config = None
-    if config_path and Path(config_path).exists():
-        try:
-            config = Config.from_yaml(config_path)
-        except Exception:
-            pass
-
-    templates_list = blog_list_templates(config)
-    return templates_list
-
-
-# ============================================================================
-# Blog Generation API Endpoints (Phase 4)
-# ============================================================================
-
-
-class BlogGenerateRequest(BaseModel):
-    """Request model for blog generation."""
-
-    topic: str = Field(..., description="Topic or title for the blog post")
-    template: Optional[str] = Field(None, description="Template name (tutorial, opinion, roundup, technical)")
-    instructions: Optional[str] = Field(None, description="Additional instructions for generation")
-
-
-def _get_config() -> Optional[Config]:
-    """Load configuration from environment."""
-    config_path = os.getenv("NYRAG_CONFIG")
-    if config_path and Path(config_path).exists():
-        try:
-            return Config.from_yaml(config_path)
-        except Exception:
-            pass
-    return None
-
-
-@app.post("/api/blog/generate")
-async def generate_blog(req: BlogGenerateRequest) -> Dict[str, Any]:
-    """Generate a blog post using RAG and LLM.
-
-    Submits a blog generation job to the background queue and returns the job ID.
-    Use GET /api/jobs/{job_id} to poll for status.
-
-    Args:
-        req: Blog generation request with topic, optional template, and instructions.
-
-    Returns:
-        Dict with job_id for status polling.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
-
-    job_queue = get_job_queue()
-
-    # Submit the blog generation task
-    job_id = await job_queue.submit(
-        job_type="blog_generation",
-        coro=generate_blog_task(
-            topic=req.topic,
-            config=config,
-            template=req.template,
-            instructions=req.instructions,
-        ),
-    )
-
-    logger.info(f"Blog generation job submitted: {job_id} for topic: {req.topic}")
-    return {"job_id": job_id, "topic": req.topic, "template": req.template}
-
-
-@app.get("/api/jobs/{job_id}")
-async def get_job_status(job_id: str) -> Dict[str, Any]:
-    """Get the status of a background job.
-
-    Args:
-        job_id: The job ID returned from a job submission endpoint.
-
-    Returns:
-        Job status including: id, type, status, result (if complete), error (if failed).
-    """
-    job_queue = get_job_queue()
-    job = job_queue.get_status(job_id)
-
-    if not job:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-
-    response = {
-        "id": job.id,
-        "type": job.type,
-        "status": job.status.value,
-        "created_at": job.created_at.isoformat(),
-    }
-
-    if job.result is not None:
-        # For blog generation, include the blog_id
-        if isinstance(job.result, dict):
-            response["result"] = job.result
-        elif hasattr(job.result, "id"):
-            response["result"] = {"blog_id": job.result.id, "topic": job.result.topic}
-        else:
-            response["result"] = str(job.result)
-
-    if job.error:
-        response["error"] = job.error
-
-    return response
-
-
-@app.get("/api/blog/{blog_id}")
-async def get_blog_content(blog_id: str) -> Dict[str, Any]:
-    """Get the content of a generated blog post.
-
-    Args:
-        blog_id: The blog post ID.
-
-    Returns:
-        Blog post details including content.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
-
-    blog = get_blog(blog_id, config)
-    if not blog:
-        raise HTTPException(status_code=404, detail=f"Blog not found: {blog_id}")
-
-    return {
-        "id": blog.id,
-        "topic": blog.topic,
-        "template": blog.template,
-        "content": blog.content,
-        "source_notes": blog.source_notes,
-        "status": blog.status.value,
-        "created_at": blog.created_at.isoformat(),
-    }
-
-
-@app.get("/api/blog/{blog_id}/download")
-async def download_blog(blog_id: str) -> FileResponse:
-    """Download a generated blog post as a markdown file.
-
-    Args:
-        blog_id: The blog post ID.
-
-    Returns:
-        Markdown file download.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
-
-    blog_path = get_blog_path(blog_id, config)
-    if not blog_path:
-        raise HTTPException(status_code=404, detail=f"Blog not found: {blog_id}")
-
-    return FileResponse(
-        path=blog_path,
-        filename=f"{blog_id}.md",
-        media_type="text/markdown",
-    )
-
-
-# ============================================================================
-# Notes Management API Endpoints (Phase 6)
-# ============================================================================
-
-
-class NoteUpdateRequest(BaseModel):
-    """Request model for note updates."""
+class CreateNoteRequest(BaseModel):
+    """Request model for creating a note."""
 
     title: str = Field(..., description="Note title")
     content: str = Field(..., description="Markdown content")
-    tags: List[str] = Field(default_factory=list, description="Tags for categorization")
+    tags: List[str] = Field(default_factory=list, description="Optional tags")
 
 
-@app.get("/api/notes")
-async def get_notes_list() -> List[Dict[str, Any]]:
-    """Get list of all notes.
+class NoteResponse(BaseModel):
+    """Response model for a note."""
 
-    Returns:
-        List of note summaries with id, title, created_at, updated_at, and tags.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
+    id: str
+    title: str
+    content: str
+    images: List[str]
+    created_at: str
+    updated_at: str
+    tags: List[str]
 
-    notes = notes_list_notes(config)
 
-    # Return summaries (not full content for list view)
+class ImageUploadResponse(BaseModel):
+    """Response model for image upload."""
+
+    url: str
+
+
+@app.get("/api/notes", response_model=List[NoteResponse])
+async def get_notes():
+    """Get all notes."""
+    from nyrag.notes import list_notes
+
+    config = _get_config_for_notes()
+    notes = list_notes(config)
+
     return [
-        {
-            "id": note.id,
-            "title": note.title,
-            "created_at": note.created_at.isoformat(),
-            "updated_at": note.updated_at.isoformat(),
-            "tags": note.tags,
-            "preview": note.content[:150] + "..." if len(note.content) > 150 else note.content,
-        }
+        NoteResponse(
+            id=note.id,
+            title=note.title,
+            content=note.content,
+            images=note.images,
+            created_at=note.created_at.isoformat(),
+            updated_at=note.updated_at.isoformat(),
+            tags=note.tags,
+        )
         for note in notes
     ]
 
 
-@app.get("/api/notes/{note_id}")
-async def get_note_by_id(note_id: str) -> Dict[str, Any]:
-    """Get a single note by ID.
+@app.post("/api/notes", response_model=NoteResponse)
+async def create_note(req: CreateNoteRequest):
+    """Create a new note and save it locally + index in Vespa."""
+    config = _get_config_for_notes()
 
-    Args:
-        note_id: The note ID.
+    note = Note(
+        id="",  # Will be generated by save_note
+        title=req.title,
+        content=req.content,
+        tags=req.tags,
+    )
 
-    Returns:
-        Full note content.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
+    saved_note = save_note(note, config)
 
-    note = notes_get_note(note_id, config)
-    if not note:
-        raise HTTPException(status_code=404, detail=f"Note not found: {note_id}")
-
-    return {
-        "id": note.id,
-        "title": note.title,
-        "content": note.content,
-        "images": note.images,
-        "tags": note.tags,
-        "created_at": note.created_at.isoformat(),
-        "updated_at": note.updated_at.isoformat(),
-    }
+    return NoteResponse(
+        id=saved_note.id,
+        title=saved_note.title,
+        content=saved_note.content,
+        images=saved_note.images,
+        created_at=saved_note.created_at.isoformat(),
+        updated_at=saved_note.updated_at.isoformat(),
+        tags=saved_note.tags,
+    )
 
 
-@app.put("/api/notes/{note_id}")
-async def update_note_endpoint(note_id: str, req: NoteUpdateRequest) -> Dict[str, Any]:
-    """Update an existing note.
+@app.post("/api/notes/upload-image", response_model=ImageUploadResponse)
+async def upload_note_image(
+    file: UploadFile = File(...),
+    note_id: str = Form(default="temp"),
+):
+    """Upload an image for a note."""
+    config = _get_config_for_notes()
 
-    Args:
-        note_id: The note ID to update.
-        req: Updated note content.
+    # Read file content
+    image_data = await file.read()
 
-    Returns:
-        Updated note.
-    """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
+    # Use temp note_id if not provided (for images uploaded before note is saved)
+    if not note_id or note_id == "temp":
+        import uuid as uuid_module
 
-    # Get existing note to preserve some fields
-    existing = notes_get_note(note_id, config)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"Note not found: {note_id}")
-
-    # Update the note
-    existing.title = req.title
-    existing.content = req.content
-    existing.tags = req.tags
+        note_id = f"temp_{uuid_module.uuid4().hex[:8]}"
 
     try:
-        updated = notes_update_note(existing, config)
-        return {
-            "id": updated.id,
-            "title": updated.title,
-            "content": updated.content,
-            "tags": updated.tags,
-            "created_at": updated.created_at.isoformat(),
-            "updated_at": updated.updated_at.isoformat(),
-        }
+        url = save_image(image_data, note_id, file.filename or "image.png", config)
+        return ImageUploadResponse(url=url)
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.delete("/api/notes/{note_id}")
-async def delete_note_endpoint(note_id: str) -> Dict[str, Any]:
-    """Delete a note.
+@app.get("/api/notes/{note_id}", response_model=NoteResponse)
+async def get_note_by_id(note_id: str):
+    """Retrieve a note by its ID."""
+    config = _get_config_for_notes()
+
+    note = get_note(note_id, config)
+    if not note:
+        raise HTTPException(status_code=404, detail=f"Note {note_id} not found")
+
+    return NoteResponse(
+        id=note.id,
+        title=note.title,
+        content=note.content,
+        images=note.images,
+        created_at=note.created_at.isoformat(),
+        updated_at=note.updated_at.isoformat(),
+        tags=note.tags,
+    )
+
+
+@app.get("/api/notes/search", response_model=List[NoteResponse])
+async def search_notes_api(q: str, limit: int = 10):
+    """Search notes by query."""
+    config = _get_config_for_notes()
+
+    notes = search_notes(q, config, limit=limit)
+
+    return [
+        NoteResponse(
+            id=note.id,
+            title=note.title,
+            content=note.content,
+            images=note.images,
+            created_at=note.created_at.isoformat(),
+            updated_at=note.updated_at.isoformat(),
+            tags=note.tags,
+        )
+        for note in notes
+    ]
+
+
+@app.get("/notes", response_class=HTMLResponse)
+async def notes_ui(request: Request) -> HTMLResponse:
+    """Render the notes capture UI."""
+    return templates.TemplateResponse("notes.html", {"request": request, "active_page": "notes"})
+
+
+@app.get("/sources", response_class=HTMLResponse)
+async def sources_ui(request: Request) -> HTMLResponse:
+    """Render the data sources management UI."""
+    return templates.TemplateResponse("sources.html", {"request": request, "active_page": "sources"})
+
+
+@app.get("/jobs", response_class=HTMLResponse)
+async def jobs_ui(request: Request) -> HTMLResponse:
+    """Render the background jobs monitoring UI."""
+    return templates.TemplateResponse("jobs.html", {"request": request, "active_page": "jobs"})
+
+
+@app.get("/agents", response_class=HTMLResponse)
+async def agents_ui(request: Request) -> HTMLResponse:
+    """Render the AI agents UI."""
+    return templates.TemplateResponse("agents.html", {"request": request, "active_page": "agents"})
+
+
+# =============================================================================
+# Blog Generation API Endpoints (Phase 4 - US2)
+# =============================================================================
+
+
+class GenerateBlogRequest(BaseModel):
+    """Request model for blog generation."""
+
+    topic: str = Field(..., description="Blog topic/title")
+    template: Optional[str] = Field(None, description="Optional template name")
+    instructions: Optional[str] = Field(None, description="Optional additional instructions")
+
+
+class GenerateBlogResponse(BaseModel):
+    """Response model for blog generation request."""
+
+    job_id: str
+    status: str
+    message: str
+
+
+class JobStatusResponse(BaseModel):
+    """Response model for job status."""
+
+    id: str
+    type: str
+    status: str
+    progress: Optional[str] = None
+    result: Optional[Any] = None
+    error: Optional[str] = None
+    created_at: str
+    completed_at: Optional[str] = None
+
+
+class BlogResponse(BaseModel):
+    """Response model for a blog post."""
+
+    id: str
+    topic: str
+    template: Optional[str]
+    content: str
+    source_notes: List[str]
+    status: str
+    created_at: str
+    error: Optional[str] = None
+
+
+# Blog intent detection patterns
+BLOG_INTENT_PATTERNS = [
+    "generate blog",
+    "write blog",
+    "create blog",
+    "write a blog",
+    "create a blog",
+    "generate a blog",
+    "write post",
+    "create post",
+    "generate post",
+    "blog post about",
+    "blog about",
+    "write article",
+    "create article",
+]
+
+
+def detect_blog_intent(message: str) -> Optional[str]:
+    """Detect if a chat message is requesting blog generation.
 
     Args:
-        note_id: The note ID to delete.
+        message: The user's chat message.
 
     Returns:
-        Deletion status.
+        The blog topic if intent detected, None otherwise.
     """
-    config = _get_config()
-    if not config:
-        raise HTTPException(status_code=500, detail="NYRAG_CONFIG not set or invalid")
+    message_lower = message.lower().strip()
 
-    success = notes_delete_note(note_id, config)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"Note not found: {note_id}")
+    for pattern in BLOG_INTENT_PATTERNS:
+        if pattern in message_lower:
+            # Extract topic - everything after the pattern
+            idx = message_lower.find(pattern)
+            topic = message[idx + len(pattern) :].strip()
+            # Remove leading "about" if present
+            if topic.lower().startswith("about "):
+                topic = topic[6:].strip()
+            # Remove quotes if present
+            topic = topic.strip("\"'")
+            if topic:
+                return topic
+            # If no topic extracted, use the full message as topic
+            return message
 
-    return {"deleted": True, "id": note_id}
+    return None
+
+
+@app.post("/api/blog/generate", response_model=GenerateBlogResponse)
+async def generate_blog(req: GenerateBlogRequest):
+    """Start background blog generation.
+
+    Submits the blog generation task to the job queue and returns immediately
+    with a job ID that can be polled for status.
+    """
+    config = _get_config_for_notes()
+    job_queue = get_job_queue()
+
+    # Submit to job queue
+    job_id = job_queue.submit(
+        job_type="blog_generation",
+        task_fn=generate_blog_task,
+        topic=req.topic,
+        config=config,
+        template=req.template,
+        instructions=req.instructions,
+    )
+
+    return GenerateBlogResponse(
+        job_id=job_id,
+        status="queued",
+        message=f"Blog generation started for topic: {req.topic[:50]}...",
+    )
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobStatusResponse)
+async def get_job_status(job_id: str):
+    """Get the status of a background job."""
+    job_queue = get_job_queue()
+    job = job_queue.get_status(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    # For blog generation, extract blog_id from result
+    result = None
+    if job.status == JobStatus.COMPLETE and job.result:
+        if isinstance(job.result, BlogPost):
+            result = {"blog_id": job.result.id, "topic": job.result.topic}
+        else:
+            result = job.result
+
+    return JobStatusResponse(
+        id=job.id,
+        type=job.type,
+        status=job.status.value,
+        progress=job.progress,
+        result=result,
+        error=job.error,
+        created_at=job.created_at.isoformat(),
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+    )
+
+
+@app.get("/api/blog/{blog_id}", response_model=BlogResponse)
+async def get_blog_by_id(blog_id: str):
+    """Retrieve a generated blog post by ID."""
+    config = _get_config_for_notes()
+    blog = get_blog(blog_id, config)
+
+    if not blog:
+        raise HTTPException(status_code=404, detail=f"Blog {blog_id} not found")
+
+    return BlogResponse(
+        id=blog.id,
+        topic=blog.topic,
+        template=blog.template,
+        content=blog.content,
+        source_notes=blog.source_notes,
+        status=blog.status.value,
+        created_at=blog.created_at.isoformat(),
+        error=blog.error,
+    )
+
+
+@app.get("/api/blog/{blog_id}/download")
+async def download_blog(blog_id: str):
+    """Download a generated blog post as a markdown file."""
+    config = _get_config_for_notes()
+    blog_path = get_blog_path(blog_id, config)
+
+    if not blog_path:
+        raise HTTPException(status_code=404, detail=f"Blog {blog_id} not found")
+
+    return FileResponse(
+        path=str(blog_path),
+        filename=f"blog-{blog_id}.md",
+        media_type="text/markdown",
+    )
