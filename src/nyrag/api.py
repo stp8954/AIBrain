@@ -156,6 +156,107 @@ async def mount_assets_on_startup():
             logger.info(f"Mounted assets directory: {assets_dir}")
 
 
+@app.on_event("startup")
+async def auto_deploy_vespa_schema():
+    """Auto-deploy Vespa schema on startup if NYRAG_AUTO_DEPLOY is set."""
+    auto_deploy = os.getenv("NYRAG_AUTO_DEPLOY", "").lower() in ("1", "true", "yes")
+    if not auto_deploy:
+        logger.info("NYRAG_AUTO_DEPLOY not set, skipping schema deployment")
+        return
+
+    # Wait for Vespa to be ready
+    vespa_url = os.getenv("VESPA_URL", "http://localhost:8080")
+    config_url = os.getenv("VESPA_CONFIG_URL", "http://localhost:19071")
+    
+    logger.info(f"Auto-deploy enabled. Checking Vespa availability at {vespa_url}")
+    
+    # Check if Vespa is healthy
+    import httpx
+    max_retries = 10
+    for i in range(max_retries):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{vespa_url}/state/v1/health", timeout=5.0)
+                if resp.status_code == 200:
+                    logger.info("Vespa is healthy, proceeding with schema deployment")
+                    break
+        except Exception as e:
+            if i < max_retries - 1:
+                logger.warning(f"Vespa not ready (attempt {i+1}/{max_retries}): {e}")
+                await asyncio.sleep(5)
+            else:
+                logger.error(f"Vespa not available after {max_retries} attempts, skipping schema deployment")
+                return
+
+    # Load config and deploy schema
+    config_path = os.getenv("NYRAG_CONFIG")
+    try:
+        if config_path and Path(config_path).exists():
+            cfg = Config.from_yaml(config_path)
+        else:
+            # Create a default config for deployment
+            cfg = Config(
+                name="nyrag",
+                mode="web",
+                start_loc="http://localhost",
+            )
+        
+        # Deploy main schema
+        from nyrag.schema import VespaSchema
+        
+        main_schema = VespaSchema(
+            schema_name=cfg.name,
+            app_package_name=cfg.name,
+            embedding_dim=cfg.embedding_dim if hasattr(cfg, 'embedding_dim') else 384,
+        )
+        app_package = main_schema.get_package()
+        
+        # Deploy to existing Vespa instance via config server
+        logger.info(f"Deploying Vespa schema '{cfg.name}' to {config_url}")
+        
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            app_package.to_files(tmp_dir)
+            
+            # Use vespa CLI or HTTP API to deploy
+            # The pyvespa VespaDocker expects to manage Docker itself
+            # For existing Vespa container, use HTTP deploy API
+            import subprocess
+            result = subprocess.run(
+                ["vespa", "deploy", "--wait", "60", "-t", config_url, tmp_dir],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                logger.success(f"Successfully deployed Vespa schema '{cfg.name}'")
+            else:
+                # Try alternative: curl to config server
+                logger.warning(f"vespa CLI failed: {result.stderr}")
+                logger.info("Attempting HTTP deploy to config server...")
+                
+                # Create application.zip
+                import shutil
+                zip_path = Path(tmp_dir) / "app.zip"
+                shutil.make_archive(str(zip_path.with_suffix('')), 'zip', tmp_dir)
+                
+                async with httpx.AsyncClient() as client:
+                    with open(zip_path, 'rb') as f:
+                        resp = await client.post(
+                            f"{config_url}/application/v2/tenant/default/prepareandactivate",
+                            content=f.read(),
+                            headers={"Content-Type": "application/zip"},
+                            timeout=120.0,
+                        )
+                        if resp.status_code in (200, 201):
+                            logger.success(f"Successfully deployed Vespa schema via HTTP")
+                        else:
+                            logger.error(f"HTTP deploy failed: {resp.status_code} {resp.text}")
+        
+    except Exception as e:
+        logger.error(f"Failed to auto-deploy Vespa schema: {e}")
+        logger.info("You can manually deploy with: nyrag --config <config.yml> deploy")
+
+
 def _get_config_for_notes() -> "Config":
     """Load config for notes operations."""
     config_path = os.getenv("NYRAG_CONFIG")
