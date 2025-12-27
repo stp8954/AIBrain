@@ -1,0 +1,596 @@
+/**
+ * Agents page styles for NyRAG UI Document Manager
+ * Background jobs monitoring interface
+ */
+
+/* Page Layout */
+.agents-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+/* Stats Grid */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+}
+
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+  cursor: pointer;
+}
+
+.stat-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.stat-card[data-active="true"] {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.stat-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
+.stat-icon.running {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+}
+
+.stat-icon.queued {
+  background: rgba(249, 115, 22, 0.1);
+  color: #f97316;
+}
+
+.stat-icon.completed {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+}
+
+.stat-icon.failed {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.stat-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.stat-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Jobs Container */
+.jobs-container {
+  position: relative;
+  min-height: 200px;
+}
+
+/* Jobs List */
+.jobs-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Job Card */
+.job-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.job-card:hover {
+  border-color: var(--primary);
+}
+
+.job-card.running {
+  border-left: 3px solid #3b82f6;
+}
+
+.job-card.queued {
+  border-left: 3px solid #f97316;
+}
+
+.job-card.completed {
+  border-left: 3px solid #22c55e;
+}
+
+.job-card.failed {
+  border-left: 3px solid #ef4444;
+}
+
+.job-card.cancelled {
+  border-left: 3px solid #6b7280;
+  opacity: 0.7;
+}
+
+/* Job Header */
+.job-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.job-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  flex: 1;
+}
+
+.job-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.job-meta-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.job-meta-separator {
+  color: var(--border);
+}
+
+/* Job Status Badge */
+.job-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  text-transform: capitalize;
+  flex-shrink: 0;
+}
+
+.job-status.running {
+  background: rgba(59, 130, 246, 0.1);
+  color: #3b82f6;
+}
+
+.job-status.queued {
+  background: rgba(249, 115, 22, 0.1);
+  color: #f97316;
+}
+
+.job-status.completed {
+  background: rgba(34, 197, 94, 0.1);
+  color: #22c55e;
+}
+
+.job-status.failed {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.job-status.cancelled {
+  background: rgba(107, 114, 128, 0.1);
+  color: #6b7280;
+}
+
+/* Spinner in status */
+.job-status .spinner-small {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Progress Bar */
+.job-progress {
+  width: 100%;
+}
+
+.progress-bar-container {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: var(--border);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  transition: width 0.3s ease;
+}
+
+.progress-bar-fill.running {
+  background: linear-gradient(90deg, #3b82f6, #60a5fa);
+}
+
+.progress-bar-fill.queued {
+  background: #f97316;
+}
+
+.progress-bar-fill.completed {
+  background: #22c55e;
+}
+
+.progress-bar-fill.failed {
+  background: #ef4444;
+}
+
+.progress-bar-fill.cancelled {
+  background: #6b7280;
+}
+
+.progress-text {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+  min-width: 45px;
+  text-align: right;
+}
+
+.progress-task {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin-top: var(--space-1);
+}
+
+/* Job Actions */
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.job-actions .btn {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* Error Message */
+.job-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: rgba(239, 68, 68, 0.05);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  color: #ef4444;
+}
+
+.job-error svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Empty and Loading States */
+.empty-state,
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-8);
+  text-align: center;
+  color: var(--text-secondary);
+}
+
+.empty-state svg,
+.loading-state svg {
+  opacity: 0.5;
+}
+
+.empty-state h3,
+.loading-state h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.empty-state p,
+.loading-state p {
+  margin: 0;
+  max-width: 300px;
+}
+
+/* Spinner */
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  padding-top: var(--space-4);
+}
+
+.page-info {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* Job Detail Modal */
+.job-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.detail-section-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3);
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.detail-label {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.detail-value {
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Logs Section */
+.job-logs {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.job-logs:empty::before {
+  content: 'No logs available';
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+/* Modal */
+.modal {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  /* Override app.css modal styles */
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  max-width: none;
+  max-height: none;
+  overflow: visible;
+  transform: none;
+}
+
+.modal.active {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal .modal-overlay {
+  position: absolute;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+}
+
+.modal .modal-content {
+  position: relative;
+  z-index: 1;
+  background-color: var(--panel-bg);
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 500px;
+  max-height: 80vh;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+.modal .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal .modal-title {
+  margin: 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.modal .modal-close {
+  background: none;
+  border: none;
+  font-size: 1.5rem;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 0;
+  line-height: 1;
+}
+
+.modal .modal-close:hover {
+  color: var(--text-primary);
+}
+
+.modal .modal-body {
+  padding: var(--space-4);
+  overflow-y: auto;
+  max-height: 50vh;
+}
+
+.modal .modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border-top: 1px solid var(--border-color);
+}
+
+@keyframes modalFadeIn {
+  from { opacity: 0; transform: translateY(-20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Modal Large */
+.modal-lg .modal-content {
+  max-width: 700px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .job-header {
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+
+  .job-status {
+    align-self: flex-start;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pagination {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .agents-page {
+    padding: var(--space-3);
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-card {
+    padding: var(--space-3);
+  }
+
+  .job-card {
+    padding: var(--space-3);
+  }
+
+  .job-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

@@ -1,5 +1,10 @@
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
+from typing import List, Literal, Optional
 
+from pydantic import BaseModel
+from pydantic import Field as PydanticField
 from vespa.package import (
     ApplicationPackage,
     Document,
@@ -366,3 +371,179 @@ def generate_notes_schema(project_name: str, embedding_dim: int = 384) -> NotesV
         app_package_name=app_package_name,
         embedding_dim=embedding_dim,
     )
+
+
+# =============================================================================
+# UI Document Manager Models
+# =============================================================================
+
+# Type literals for status enums
+DataSourceType = Literal["url", "pdf", "markdown", "txt"]
+DataSourceStatus = Literal["pending", "processing", "indexed", "failed"]
+JobType = Literal["crawl", "process_file", "sync"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+MessageRole = Literal["user", "assistant"]
+
+
+def generate_id() -> str:
+    """Generate a new UUID string."""
+    return str(uuid.uuid4())
+
+
+# -----------------------------------------------------------------------------
+# Data Source Models
+# -----------------------------------------------------------------------------
+
+
+class DataSourceCreate(BaseModel):
+    """Request model for creating a data source."""
+
+    source_type: DataSourceType
+    name: str = PydanticField(..., min_length=1, max_length=255)
+    url: Optional[str] = PydanticField(None, max_length=2048)
+    file_path: Optional[str] = PydanticField(None, max_length=1024)
+
+
+class DataSourceUpdate(BaseModel):
+    """Request model for updating a data source."""
+
+    name: Optional[str] = None
+    status: Optional[DataSourceStatus] = PydanticField(None)
+    error_message: Optional[str] = None
+    document_count: Optional[int] = None
+
+
+class DataSourceResponse(BaseModel):
+    """Response model for a data source."""
+
+    id: str
+    source_type: DataSourceType
+    name: str
+    status: DataSourceStatus
+    url: Optional[str] = None
+    file_path: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = PydanticField(None)
+    document_count: int = 0
+    error_message: Optional[str] = None
+
+
+class DataSourceListResponse(BaseModel):
+    """Response model for listing data sources."""
+
+    sources: List[DataSourceResponse]
+    total: int
+
+
+# -----------------------------------------------------------------------------
+# Job Models
+# -----------------------------------------------------------------------------
+
+
+class JobCreate(BaseModel):
+    """Request model for creating a job."""
+
+    job_type: JobType
+    data_source_id: str = PydanticField(..., min_length=1)
+
+
+class JobUpdate(BaseModel):
+    """Request model for updating a job."""
+
+    status: Optional[JobStatus] = None
+    progress: Optional[int] = PydanticField(None, ge=0, le=100)
+    error_message: Optional[str] = None
+    completed_at: Optional[datetime] = None
+
+
+class JobResponse(BaseModel):
+    """Response model for a job."""
+
+    id: str
+    job_type: JobType
+    data_source_id: str
+    status: JobStatus
+    progress: int = 0
+    error_message: Optional[str] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+
+class JobListResponse(BaseModel):
+    """Response model for listing jobs."""
+
+    jobs: List[JobResponse]
+    total: int
+
+
+# -----------------------------------------------------------------------------
+# Conversation Models
+# -----------------------------------------------------------------------------
+
+
+class ConversationCreate(BaseModel):
+    """Request model for creating a conversation."""
+
+    title: Optional[str] = PydanticField(None, max_length=255)
+
+
+class ConversationResponse(BaseModel):
+    """Response model for a conversation."""
+
+    id: str
+    title: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationListResponse(BaseModel):
+    """Response model for listing conversations."""
+
+    conversations: List[ConversationResponse]
+    total: int
+
+
+# -----------------------------------------------------------------------------
+# Message Models
+# -----------------------------------------------------------------------------
+
+
+class MessageCreate(BaseModel):
+    """Request model for creating a message."""
+
+    role: MessageRole
+    content: str = PydanticField(..., min_length=1)
+
+
+class MessageResponse(BaseModel):
+    """Response model for a message."""
+
+    id: str
+    conversation_id: str
+    role: MessageRole
+    content: str
+    created_at: datetime
+
+
+class MessageListResponse(BaseModel):
+    """Response model for listing messages."""
+
+    messages: List[MessageResponse]
+    total: int
+
+
+# -----------------------------------------------------------------------------
+# System Status Models
+# -----------------------------------------------------------------------------
+
+
+class SystemStatusResponse(BaseModel):
+    """Response model for system status."""
+
+    vespa_available: bool = PydanticField(..., description="Whether Vespa is reachable")
+    database_available: bool = PydanticField(..., description="Whether SQLite database is accessible")
+    running_jobs: int = PydanticField(..., description="Number of currently running jobs")
+    queued_jobs: int = PydanticField(..., description="Number of queued jobs")
+    total_data_sources: int = PydanticField(..., description="Total number of data sources")
+    total_conversations: int = PydanticField(..., description="Total number of conversations")

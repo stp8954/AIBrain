@@ -1,0 +1,750 @@
+openapi: 3.1.0
+info:
+  title: NyRAG UI Document Manager API
+  description: API for managing data sources, ingestion jobs, and chat conversations
+  version: 1.0.0
+  contact:
+    name: NyRAG
+servers:
+  - url: http://localhost:8000
+    description: Local development server
+
+tags:
+  - name: Sources
+    description: Data source management (URLs and files)
+  - name: Jobs
+    description: Background job monitoring and control
+  - name: Conversations
+    description: Chat conversation history
+  - name: Health
+    description: System health and status
+
+paths:
+  # ============== DATA SOURCES ==============
+  /api/sources:
+    get:
+      tags: [Sources]
+      summary: List all data sources
+      description: Returns paginated list of all data sources with optional filtering
+      operationId: listSources
+      parameters:
+        - name: type
+          in: query
+          description: Filter by source type
+          schema:
+            type: string
+            enum: [url, pdf, markdown, txt]
+        - name: status
+          in: query
+          description: Filter by status
+          schema:
+            type: string
+            enum: [pending, processing, indexed, failed]
+        - name: limit
+          in: query
+          description: Maximum number of results
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: offset
+          in: query
+          description: Offset for pagination
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of data sources
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DataSource'
+                  total:
+                    type: integer
+                    description: Total count of matching sources
+
+  /api/sources/url:
+    post:
+      tags: [Sources]
+      summary: Add URL for crawling
+      description: Creates a new data source from a URL and starts background crawl job
+      operationId: addUrlSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddUrlRequest'
+      responses:
+        '201':
+          description: Source created and job started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddSourceResponse'
+        '400':
+          description: Invalid URL format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Vespa service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sources/files:
+    post:
+      tags: [Sources]
+      summary: Upload files for processing
+      description: Uploads one or more files and starts background processing jobs
+      operationId: uploadFiles
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Files to upload (max 50MB each)
+              required:
+                - files
+      responses:
+        '201':
+          description: Files uploaded and jobs started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AddSourceResponse'
+        '400':
+          description: Invalid file type or no files provided
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: File too large (max 50MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Vespa service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sources/{source_id}:
+    get:
+      tags: [Sources]
+      summary: Get source details
+      operationId: getSource
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Source details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataSource'
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Sources]
+      summary: Delete a data source
+      description: Removes data source and all associated chunks from Vespa
+      operationId: deleteSource
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Source deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Source deleted successfully"
+                  chunks_deleted:
+                    type: integer
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sources/{source_id}/sync:
+    post:
+      tags: [Sources]
+      summary: Re-index a data source
+      description: Triggers re-crawl for URLs or re-processing for files
+      operationId: syncSource
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Sync job started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  message:
+                    type: string
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Source is already processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/sources/{source_id}/progress:
+    get:
+      tags: [Sources]
+      summary: Stream source progress (SSE)
+      description: Server-Sent Events stream for real-time progress updates
+      operationId: streamSourceProgress
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: SSE stream of progress events
+          content:
+            text/event-stream:
+              schema:
+                type: object
+                properties:
+                  progress:
+                    type: integer
+                  status:
+                    type: string
+                  current_task:
+                    type: string
+
+  # ============== JOBS ==============
+  /api/jobs:
+    get:
+      tags: [Jobs]
+      summary: List all jobs
+      operationId: listJobs
+      parameters:
+        - name: status
+          in: query
+          description: Filter by job status
+          schema:
+            type: string
+            enum: [queued, running, completed, failed, cancelled]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Job'
+                  total:
+                    type: integer
+
+  /api/jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      summary: Get job details with logs
+      operationId: getJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDetail'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jobs/{job_id}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cancel a running job
+      operationId: cancelJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Job cannot be cancelled (not running)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jobs/{job_id}/retry:
+    post:
+      tags: [Jobs]
+      summary: Retry a failed job
+      operationId: retryJob
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: New job created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  message:
+                    type: string
+        '400':
+          description: Job cannot be retried (not failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/jobs/{job_id}/stream:
+    get:
+      tags: [Jobs]
+      summary: Stream job progress (SSE)
+      description: Server-Sent Events stream for real-time job updates
+      operationId: streamJobProgress
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: SSE stream of job events
+          content:
+            text/event-stream:
+              schema:
+                type: object
+
+  # ============== CONVERSATIONS ==============
+  /api/conversations:
+    get:
+      tags: [Conversations]
+      summary: List all conversations
+      operationId: listConversations
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conversation'
+                  total:
+                    type: integer
+    post:
+      tags: [Conversations]
+      summary: Create new conversation
+      operationId: createConversation
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  description: Optional title (auto-generated if not provided)
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+
+  /api/conversations/{conversation_id}:
+    get:
+      tags: [Conversations]
+      summary: Get conversation with messages
+      operationId: getConversation
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Conversation with all messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConversationDetail'
+        '404':
+          description: Conversation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Conversations]
+      summary: Delete a conversation
+      operationId: deleteConversation
+      parameters:
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Conversation deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '404':
+          description: Conversation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ============== HEALTH/STATUS ==============
+  /api/status:
+    get:
+      tags: [Health]
+      summary: Get system status
+      description: Returns indexed document/chunk counts and Vespa availability
+      operationId: getStatus
+      responses:
+        '200':
+          description: System status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemStatus'
+
+components:
+  schemas:
+    DataSource:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [url, pdf, markdown, txt]
+        source_path:
+          type: string
+          nullable: true
+        date_added:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [pending, processing, indexed, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        chunk_count:
+          type: integer
+        error_message:
+          type: string
+          nullable: true
+      required:
+        - id
+        - name
+        - type
+        - date_added
+        - status
+
+    AddUrlRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Base URL to crawl
+        exclude_patterns:
+          type: array
+          items:
+            type: string
+          description: URL patterns to exclude from crawling
+      required:
+        - url
+
+    AddSourceResponse:
+      type: object
+      properties:
+        source_id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+        message:
+          type: string
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        source_name:
+          type: string
+          description: Name of associated data source
+        job_type:
+          type: string
+          enum: [crawl, process_file, sync]
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        current_task:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+      required:
+        - id
+        - source_id
+        - job_type
+        - status
+        - started_at
+
+    JobDetail:
+      allOf:
+        - $ref: '#/components/schemas/Job'
+        - type: object
+          properties:
+            logs:
+              type: string
+              nullable: true
+              description: Full job logs (newline-separated)
+
+    Conversation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        message_count:
+          type: integer
+      required:
+        - id
+        - created_at
+        - updated_at
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - role
+        - content
+        - created_at
+
+    ConversationDetail:
+      allOf:
+        - $ref: '#/components/schemas/Conversation'
+        - type: object
+          properties:
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+
+    SystemStatus:
+      type: object
+      properties:
+        vespa_available:
+          type: boolean
+        document_count:
+          type: integer
+          description: Total indexed data sources
+        chunk_count:
+          type: integer
+          description: Total chunks across all sources
+        active_jobs:
+          type: integer
+          description: Currently running jobs
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+      required:
+        - error

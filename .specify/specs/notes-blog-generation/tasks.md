@@ -163,35 +163,35 @@
 
 ### Implementation for User Story 3
 
-- [X] T044 [P] [US3] Create `src/nyrag/blog_templates/tutorial.yaml`
+- [ ] T044 [P] [US3] Create `src/nyrag/blog_templates/tutorial.yaml`
   - Structure: introduction, prerequisites, steps[], conclusion
   - System prompt for instructional tone
-- [X] T045 [P] [US3] Create `src/nyrag/blog_templates/opinion.yaml`
+- [ ] T045 [P] [US3] Create `src/nyrag/blog_templates/opinion.yaml`
   - Structure: hook, thesis, arguments[], counterpoint, conclusion
   - System prompt for persuasive tone
-- [X] T046 [P] [US3] Create `src/nyrag/blog_templates/roundup.yaml`
+- [ ] T046 [P] [US3] Create `src/nyrag/blog_templates/roundup.yaml`
   - Structure: introduction, items[], comparison, recommendation
   - System prompt for curated list style
-- [X] T047 [P] [US3] Create `src/nyrag/blog_templates/technical.yaml`
+- [ ] T047 [P] [US3] Create `src/nyrag/blog_templates/technical.yaml`
   - Structure: problem, background, solution, implementation, results
   - System prompt for technical depth
-- [X] T048 [US3] Implement `load_template()` in `src/nyrag/blog.py`
+- [ ] T048 [US3] Implement `load_template()` in `src/nyrag/blog.py`
   - Load YAML from `blog_templates/` directory
   - Parse into BlogTemplate model
   - Cache loaded templates
-- [X] T049 [US3] Implement `list_templates()` in `src/nyrag/blog.py`
+- [ ] T049 [US3] Implement `list_templates()` in `src/nyrag/blog.py`
   - Scan `blog_templates/` directory
   - Return list of available template names
-- [X] T050 [US3] Modify `build_blog_prompt()` to use template in `src/nyrag/blog.py`
+- [ ] T050 [US3] Modify `build_blog_prompt()` to use template in `src/nyrag/blog.py`
   - Include template structure in prompt
   - Use template system_prompt
-- [X] T051 [US3] Add `GET /api/blog/templates` endpoint in `src/nyrag/api.py`
+- [ ] T051 [US3] Add `GET /api/blog/templates` endpoint in `src/nyrag/api.py`
   - Return list of available templates with descriptions
-- [X] T052 [US3] Add template selector in blog generation UI in `src/nyrag/static/chat.js`
+- [ ] T052 [US3] Add template selector in blog generation UI in `src/nyrag/static/chat.js`
   - Dropdown or buttons for template selection
   - Include in generation request
 
-**Checkpoint**: User Story 3 complete - Blogs can be generated with different templates ✅
+**Checkpoint**: User Story 3 complete - Blogs can be generated with different templates
 
 ---
 
@@ -203,33 +203,33 @@
 
 ### Implementation for User Story 4
 
-- [X] T053 [US4] Implement `list_notes()` in `src/nyrag/notes.py`
+- [ ] T053 [US4] Implement `list_notes()` in `src/nyrag/notes.py`
   - Read all notes from JSONL
   - Return list sorted by created_at desc
-- [X] T054 [US4] Implement `update_note()` in `src/nyrag/notes.py`
+- [ ] T054 [US4] Implement `update_note()` in `src/nyrag/notes.py`
   - Update in local JSONL (rewrite file)
   - Re-index in Vespa with new embedding
-- [X] T055 [US4] Implement `delete_note()` in `src/nyrag/notes.py`
+- [ ] T055 [US4] Implement `delete_note()` in `src/nyrag/notes.py`
   - Remove from local JSONL
   - Delete from Vespa
   - Delete associated images from assets/
-- [X] T056 [US4] Add `GET /api/notes` endpoint in `src/nyrag/api.py`
+- [ ] T056 [US4] Add `GET /api/notes` endpoint in `src/nyrag/api.py`
   - Return list of all notes (summary: id, title, created_at)
-- [X] T057 [US4] Add `PUT /api/notes/{note_id}` endpoint in `src/nyrag/api.py`
+- [ ] T057 [US4] Add `PUT /api/notes/{note_id}` endpoint in `src/nyrag/api.py`
   - Accept updated note content
-- [X] T058 [US4] Add `DELETE /api/notes/{note_id}` endpoint in `src/nyrag/api.py`
-- [X] T059 [US4] Add notes list view in `src/nyrag/static/notes.js`
+- [ ] T058 [US4] Add `DELETE /api/notes/{note_id}` endpoint in `src/nyrag/api.py`
+- [ ] T059 [US4] Add notes list view in `src/nyrag/static/notes.js`
   - Sidebar or separate view showing all notes
   - Click to load note in editor
-- [X] T060 [US4] Add edit mode in `src/nyrag/static/notes.js`
+- [ ] T060 [US4] Add edit mode in `src/nyrag/static/notes.js`
   - Load existing note content
   - PUT on save
-- [X] T061 [US4] Add delete functionality in `src/nyrag/static/notes.js`
+- [ ] T061 [US4] Add delete functionality in `src/nyrag/static/notes.js`
   - Confirmation dialog
   - DELETE request
   - Remove from list
 
-**Checkpoint**: User Story 4 complete - Full notes CRUD in UI ✅
+**Checkpoint**: User Story 4 complete - Full notes CRUD in UI
 
 ---
 
@@ -237,13 +237,11 @@
 
 **Purpose**: Final touches and cross-cutting improvements
 
-- [X] T062 [P] Add navigation link to `/notes` in `src/nyrag/templates/chat.html`
-- [X] T063 [P] Update README.md with notes and blog generation documentation
-- [X] T064 [P] Add example notes config to `configs/example.yml`
-- [X] T065 Run `make quality` and fix any style issues
+- [ ] T062 [P] Add navigation link to `/notes` in `src/nyrag/templates/chat.html`
+- [ ] T063 [P] Update README.md with notes and blog generation documentation
+- [ ] T064 [P] Add example notes config to `configs/example.yml`
+- [ ] T065 Run `make quality` and fix any style issues
 - [ ] T066 Validate full flow: create note → search → generate blog → download
-
-**Checkpoint**: Phase 7 complete - Polish & Integration ✅
 
 ---
 

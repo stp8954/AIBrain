@@ -1,6 +1,6 @@
 name: webrag
 mode: web
-start_loc: https://vespa.ai/
+start_loc: https://huggingface.co/docs/peft/index
 exclude:
   - https://vespa.ai/pricing
   - https://vespa.ai/sales

@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+
+{% block title %}Data Sources - NyRAG{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="/static/sources.css" />
+{% endblock %}
+
+{% block content %}
+<div class="sources-page">
+  <!-- Page Header -->
+  <header class="page-header">
+    <div class="header-content">
+      <h1 class="page-title">Data Sources</h1>
+      <p class="page-subtitle">Manage your indexed documents and URLs</p>
+    </div>
+    <div class="header-actions">
+      <button id="add-source-btn" class="btn btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        Add Source
+      </button>
+    </div>
+  </header>
+
+  <!-- Filters -->
+  <div class="filters-bar">
+    <div class="filter-group">
+      <label for="filter-type" class="filter-label">Type:</label>
+      <select id="filter-type" class="filter-select">
+        <option value="">All Types</option>
+        <option value="url">URL</option>
+        <option value="pdf">PDF</option>
+        <option value="markdown">Markdown</option>
+        <option value="txt">Text</option>
+      </select>
+    </div>
+
+    <div class="filter-group">
+      <label for="filter-status" class="filter-label">Status:</label>
+      <select id="filter-status" class="filter-select">
+        <option value="">All Statuses</option>
+        <option value="pending">Pending</option>
+        <option value="processing">Processing</option>
+        <option value="indexed">Indexed</option>
+        <option value="failed">Failed</option>
+      </select>
+    </div>
+
+    <div class="filter-group filter-search">
+      <input type="text" id="filter-search" class="filter-input" placeholder="Search sources...">
+    </div>
+
+    <button id="refresh-btn" class="btn btn-secondary btn-icon" title="Refresh">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <polyline points="1 20 1 14 7 14"></polyline>
+        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Sources Table -->
+  <div class="table-container">
+    <table class="data-table" id="sources-table">
+      <thead>
+        <tr>
+          <th class="col-name">Name</th>
+          <th class="col-type">Type</th>
+          <th class="col-status">Status</th>
+          <th class="col-documents">Documents</th>
+          <th class="col-date">Added</th>
+          <th class="col-actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="sources-tbody">
+        <!-- Sources will be loaded here dynamically -->
+      </tbody>
+    </table>
+
+    <!-- Empty State -->
+    <div id="empty-state" class="empty-state" style="display: none;">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+        <polyline points="14 2 14 8 20 8"></polyline>
+        <line x1="12" y1="18" x2="12" y2="12"></line>
+        <line x1="9" y1="15" x2="15" y2="15"></line>
+      </svg>
+      <h3>No data sources yet</h3>
+      <p>Add a URL or upload files to get started</p>
+      <button id="empty-add-btn" class="btn btn-primary">Add Source</button>
+    </div>
+
+    <!-- Loading State -->
+    <div id="loading-state" class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading sources...</p>
+    </div>
+  </div>
+
+  <!-- Pagination -->
+  <div class="pagination" id="pagination" style="display: none;">
+    <button id="prev-page" class="btn btn-secondary" disabled>Previous</button>
+    <span id="page-info" class="page-info">Page 1 of 1</span>
+    <button id="next-page" class="btn btn-secondary" disabled>Next</button>
+  </div>
+</div>
+
+<!-- Add Source Modal -->
+<div id="add-source-modal" class="modal" style="display: none;">
+  <div class="modal-backdrop"></div>
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Add Data Source</h2>
+      <button class="modal-close" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+
+    <div class="modal-body">
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="url-tab">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+          </svg>
+          URL
+        </button>
+        <button class="tab-btn" data-tab="file-tab">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          Upload Files
+        </button>
+      </div>
+
+      <!-- URL Tab -->
+      <div id="url-tab" class="tab-content active">
+        <form id="url-form">
+          <div class="form-group">
+            <label for="source-url">URL to crawl</label>
+            <input type="url" id="source-url" class="form-input" placeholder="https://example.com/docs" required>
+            <p class="form-hint">Enter a URL to crawl and index its content</p>
+          </div>
+          <div class="form-group">
+            <label for="source-name">Display Name (optional)</label>
+            <input type="text" id="source-name" class="form-input" placeholder="My Documentation">
+            <p class="form-hint">A friendly name for this source. Leave empty to auto-generate.</p>
+          </div>
+        </form>
+      </div>
+
+      <!-- File Upload Tab -->
+      <div id="file-tab" class="tab-content" style="display: none;">
+        <div class="file-upload-area" id="file-upload-area">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+          <p class="upload-text">Drag and drop files here, or click to browse</p>
+          <p class="upload-hint">Supported: PDF, Markdown, TXT (max 50MB each)</p>
+          <input type="file" id="file-input" class="file-input" multiple
+            accept=".pdf,.md,.markdown,.txt,.text,application/pdf,text/markdown,text/plain">
+        </div>
+        <div id="file-list" class="file-list"></div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="cancel-btn">Cancel</button>
+      <button class="btn btn-primary" id="submit-btn">
+        <span class="btn-text">Add Source</span>
+        <span class="btn-loading" style="display: none;">
+          <span class="spinner-small"></span>
+          Adding...
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Confirmation Modal -->
+<div id="delete-modal" class="modal" style="display: none;">
+  <div class="modal-backdrop"></div>
+  <div class="modal-content modal-sm">
+    <div class="modal-header">
+      <h2>Delete Source</h2>
+      <button class="modal-close" aria-label="Close">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p>Are you sure you want to delete <strong id="delete-source-name"></strong>?</p>
+      <p class="warning-text">This will also remove all indexed chunks from Vespa. Chat conversations will remain intact.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="delete-cancel-btn">Cancel</button>
+      <button class="btn btn-danger" id="delete-confirm-btn">Delete</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="/static/sources.js"></script>
+{% endblock %}

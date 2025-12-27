@@ -19,19 +19,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
 from nyrag.config import Config
 from nyrag.logger import get_logger
-from nyrag.utils import (
-    DEFAULT_EMBEDDING_MODEL,
-    get_vespa_tls_config,
-    make_vespa_client,
-    resolve_vespa_port,
-)
+from nyrag.utils import DEFAULT_EMBEDDING_MODEL, get_vespa_tls_config, make_vespa_client, resolve_vespa_port
 
 
 logger = get_logger("blog")
@@ -148,12 +142,14 @@ def retrieve_rag_context(topic: str, config: Config, limit: int = 10) -> List[Di
                 chunk_texts = fields.get("chunks_topk") or []
                 hit_score = float(hit.get("relevance", 0.0) or 0.0)
                 for chunk in chunk_texts:
-                    chunks.append({
-                        "loc": loc,
-                        "chunk": chunk,
-                        "score": hit_score,
-                        "source_type": "document",
-                    })
+                    chunks.append(
+                        {
+                            "loc": loc,
+                            "chunk": chunk,
+                            "score": hit_score,
+                            "source_type": "document",
+                        }
+                    )
         except Exception as e:
             logger.warning(f"Failed to query main schema: {e}")
 
@@ -174,12 +170,14 @@ def retrieve_rag_context(topic: str, config: Config, limit: int = 10) -> List[Di
                 title = fields.get("title", "")
                 content = fields.get("content", "")
                 hit_score = float(hit.get("relevance", 0.0) or 0.0)
-                chunks.append({
-                    "loc": f"note:{note_id}:{title}",
-                    "chunk": content[:2000],  # Limit chunk size
-                    "score": hit_score,
-                    "source_type": "note",
-                })
+                chunks.append(
+                    {
+                        "loc": f"note:{note_id}:{title}",
+                        "chunk": content[:2000],  # Limit chunk size
+                        "score": hit_score,
+                        "source_type": "note",
+                    }
+                )
         except Exception as e:
             logger.warning(f"Failed to query notes schema: {e}")
 
@@ -213,9 +211,7 @@ def build_blog_prompt(
         Complete prompt string for the LLM.
     """
     # Build context section
-    context_text = "\n\n".join(
-        [f"[Source: {c.get('loc', 'unknown')}]\n{c.get('chunk', '')}" for c in context]
-    )
+    context_text = "\n\n".join([f"[Source: {c.get('loc', 'unknown')}]\n{c.get('chunk', '')}" for c in context])
 
     # Default Substack-style system prompt
     system_prompt = """You are an expert blog writer creating engaging, Substack-compatible blog posts.
@@ -240,9 +236,7 @@ Include attribution to sources when referencing specific information."""
     if template:
         system_prompt = template.system_prompt
         # Add template structure guidance
-        structure_hint = "\n\nFollow this structure:\n" + "\n".join(
-            [f"- {section}" for section in template.structure]
-        )
+        structure_hint = "\n\nFollow this structure:\n" + "\n".join([f"- {section}" for section in template.structure])
         system_prompt += structure_hint
 
     # Build user prompt
@@ -287,7 +281,9 @@ async def generate_blog_content(prompt: str, config: Config) -> str:
     # Remove the final instruction line if present
     if "\n\nWrite the complete blog post" in user_content:
         user_parts = user_content.rsplit("\n\nWrite the complete blog post", 1)
-        user_content = user_parts[0] + "\n\nWrite the complete blog post in markdown format. Start with a title using # heading."
+        user_content = (
+            user_parts[0] + "\n\nWrite the complete blog post in markdown format. Start with a title using # heading."
+        )
 
     messages = [
         {"role": "system", "content": system_content},
@@ -440,137 +436,32 @@ async def generate_blog_task(
         raise
 
 
-# Template cache to avoid repeated file reads
-_template_cache: Dict[str, BlogTemplate] = {}
+# Placeholder functions - to be implemented in Phase 5 (US3)
 
 
-def _get_templates_dir(config: Optional[Config] = None) -> Path:
-    """Get the path to the blog templates directory.
-
-    Args:
-        config: NyRAG configuration (optional).
-
-    Returns:
-        Path to the templates directory.
-    """
-    # First check if config specifies a custom templates path
-    if config and config.blog_params and config.blog_params.templates_path:
-        custom_path = Path(config.blog_params.templates_path)
-        if custom_path.is_absolute() and custom_path.exists():
-            return custom_path
-        # Try relative to output path
-        output_path = config.get_output_path()
-        relative_path = output_path / config.blog_params.templates_path
-        if relative_path.exists():
-            return relative_path
-
-    # Default: use bundled templates in package
-    return Path(__file__).parent / "blog_templates"
-
-
-def load_template(template_name: str, config: Optional[Config] = None) -> BlogTemplate:
+def load_template(template_name: str, config: Config) -> BlogTemplate:
     """Load a blog template from YAML configuration.
 
     Args:
-        template_name: Name of the template to load (without .yaml extension).
-        config: NyRAG configuration (optional).
+        template_name: Name of the template to load.
+        config: NyRAG configuration.
 
     Returns:
-        The loaded BlogTemplate.
-
-    Raises:
-        FileNotFoundError: If the template file doesn't exist.
-        ValueError: If the template YAML is invalid.
+        The loaded template.
     """
-    # Check cache first
-    cache_key = template_name
-    if cache_key in _template_cache:
-        logger.debug(f"Using cached template: {template_name}")
-        return _template_cache[cache_key]
-
-    templates_dir = _get_templates_dir(config)
-    template_file = templates_dir / f"{template_name}.yaml"
-
-    if not template_file.exists():
-        raise FileNotFoundError(f"Template not found: {template_name} (looked in {templates_dir})")
-
-    try:
-        with open(template_file, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid template format: expected dict, got {type(data)}")
-
-        # Parse into BlogTemplate model
-        template = BlogTemplate(
-            name=data.get("name", template_name),
-            description=data.get("description", ""),
-            structure=data.get("structure", []),
-            system_prompt=data.get("system_prompt", ""),
-            example_output=data.get("example_output"),
-        )
-
-        # Cache the loaded template
-        _template_cache[cache_key] = template
-        logger.info(f"Loaded template: {template_name}")
-
-        return template
-
-    except yaml.YAMLError as e:
-        raise ValueError(f"Failed to parse template YAML: {e}")
-    except Exception as e:
-        raise ValueError(f"Failed to load template {template_name}: {e}")
+    raise NotImplementedError("To be implemented in Phase 5 (T048)")
 
 
-def list_templates(config: Optional[Config] = None) -> List[Dict[str, str]]:
+def list_templates(config: Config) -> List[str]:
     """List all available blog templates.
 
     Args:
-        config: NyRAG configuration (optional).
-
-    Returns:
-        List of template info dicts with 'name' and 'description' keys.
-    """
-    templates_dir = _get_templates_dir(config)
-
-    if not templates_dir.exists():
-        logger.warning(f"Templates directory not found: {templates_dir}")
-        return []
-
-    templates = []
-    for template_file in sorted(templates_dir.glob("*.yaml")):
-        # Skip hidden files and non-template files
-        if template_file.name.startswith("."):
-            continue
-
-        try:
-            with open(template_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
-
-            if isinstance(data, dict):
-                templates.append({
-                    "name": data.get("name", template_file.stem),
-                    "description": data.get("description", ""),
-                    "structure": data.get("structure", []),
-                })
-        except Exception as e:
-            logger.warning(f"Failed to read template {template_file.name}: {e}")
-            continue
-
-    logger.info(f"Found {len(templates)} templates in {templates_dir}")
-    return templates
-
-
-def get_template_names(config: Optional[Config] = None) -> List[str]:
-    """Get just the names of available templates.
-
-    Args:
-        config: NyRAG configuration (optional).
+        config: NyRAG configuration.
 
     Returns:
         List of template names.
     """
-    return [t["name"] for t in list_templates(config)]
+    raise NotImplementedError("To be implemented in Phase 5 (T049)")
 
 
 def get_blog(blog_id: str, config: Config) -> Optional[BlogPost]:
@@ -599,6 +490,7 @@ def get_blog(blog_id: str, config: Config) -> Optional[BlogPost]:
             parts = content.split("---", 2)
             if len(parts) >= 3:
                 import yaml
+
                 frontmatter = yaml.safe_load(parts[1])
                 markdown_content = parts[2].strip()
 

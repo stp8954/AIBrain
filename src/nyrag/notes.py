@@ -189,8 +189,15 @@ def index_note_vespa(note: Note, config: Config) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Failed to index note {note.id} in Vespa: {e}")
-        # Note: In production, should queue for retry
+        error_msg = str(e)
+        if "does not exist" in error_msg:
+            logger.warning(
+                f"Notes Vespa schema '{schema_name}' not found. "
+                "Notes will be saved locally but not indexed for search. "
+                "Deploy the notes schema to enable Vespa indexing."
+            )
+        else:
+            logger.error(f"Failed to index note {note.id} in Vespa: {e}")
         return False
 
 

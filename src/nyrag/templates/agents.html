@@ -1,0 +1,285 @@
+{% extends "base.html" %}
+
+{% block title %}Agents - NyRAG{% endblock %}
+
+{% block extra_css %}
+<style>
+.agents-page {
+  padding: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 2rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.header-content {
+  flex: 1;
+}
+
+.page-title {
+  font-size: 1.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.5rem 0;
+}
+
+.page-subtitle {
+  color: var(--text-secondary);
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.agents-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1.5rem;
+}
+
+.agent-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  transition: all var(--transition-normal);
+}
+
+.agent-card:hover {
+  border-color: var(--accent-color);
+  box-shadow: var(--shadow-md);
+}
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.agent-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.agent-icon.research {
+  background: var(--info-bg);
+  color: var(--info-color);
+}
+
+.agent-icon.summarize {
+  background: var(--success-bg);
+  color: var(--success-color);
+}
+
+.agent-icon.analyze {
+  background: var(--warning-bg);
+  color: var(--warning-color);
+}
+
+.agent-card-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem 0;
+}
+
+.agent-card-subtitle {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.agent-card-description {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  margin-bottom: 1.5rem;
+}
+
+.agent-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.agent-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.status-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success-color);
+}
+
+.status-indicator.offline {
+  background: var(--text-muted);
+}
+
+.coming-soon-section {
+  margin-top: 3rem;
+  padding: 2rem;
+  background: var(--panel-bg);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.coming-soon-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.5rem 0;
+}
+
+.coming-soon-description {
+  color: var(--text-secondary);
+  margin: 0;
+  max-width: 600px;
+  margin: 0 auto;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="agents-page">
+  <!-- Page Header -->
+  <header class="page-header">
+    <div class="header-content">
+      <h1 class="page-title">AI Agents</h1>
+      <p class="page-subtitle">Specialized agents for research, analysis, and content generation</p>
+    </div>
+    <div class="header-actions">
+      <a href="/jobs" class="btn btn-secondary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="16" y1="2" x2="16" y2="6"></line>
+          <line x1="8" y1="2" x2="8" y2="6"></line>
+          <line x1="3" y1="10" x2="21" y2="10"></line>
+        </svg>
+        View Jobs
+      </a>
+    </div>
+  </header>
+
+  <!-- Agent Cards -->
+  <div class="agents-grid">
+    <!-- Research Agent -->
+    <div class="agent-card">
+      <div class="agent-card-header">
+        <div class="agent-icon research">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+        </div>
+        <div>
+          <h3 class="agent-card-title">Deep Research Agent</h3>
+          <p class="agent-card-subtitle">Multi-step research with citations</p>
+        </div>
+      </div>
+      <p class="agent-card-description">
+        Performs comprehensive research on a topic by querying your indexed documents, synthesizing findings, 
+        and providing detailed reports with source citations.
+      </p>
+      <div class="agent-card-footer">
+        <div class="agent-status">
+          <span class="status-indicator"></span>
+          <span>Available</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="alert('Research agent coming soon!')">
+          Start Research
+        </button>
+      </div>
+    </div>
+
+    <!-- Summarization Agent -->
+    <div class="agent-card">
+      <div class="agent-card-header">
+        <div class="agent-icon summarize">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+            <polyline points="14 2 14 8 20 8"></polyline>
+            <line x1="16" y1="13" x2="8" y2="13"></line>
+            <line x1="16" y1="17" x2="8" y2="17"></line>
+          </svg>
+        </div>
+        <div>
+          <h3 class="agent-card-title">Summarization Agent</h3>
+          <p class="agent-card-subtitle">Condense documents and sources</p>
+        </div>
+      </div>
+      <p class="agent-card-description">
+        Creates concise summaries of your indexed documents, highlighting key points, 
+        main arguments, and important takeaways.
+      </p>
+      <div class="agent-card-footer">
+        <div class="agent-status">
+          <span class="status-indicator"></span>
+          <span>Available</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="alert('Summarization agent coming soon!')">
+          Summarize
+        </button>
+      </div>
+    </div>
+
+    <!-- Analysis Agent -->
+    <div class="agent-card">
+      <div class="agent-card-header">
+        <div class="agent-icon analyze">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="20" x2="18" y2="10"></line>
+            <line x1="12" y1="20" x2="12" y2="4"></line>
+            <line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+        </div>
+        <div>
+          <h3 class="agent-card-title">Analysis Agent</h3>
+          <p class="agent-card-subtitle">Compare and contrast sources</p>
+        </div>
+      </div>
+      <p class="agent-card-description">
+        Analyzes relationships between documents, identifies patterns, contradictions, 
+        and provides comparative insights across your knowledge base.
+      </p>
+      <div class="agent-card-footer">
+        <div class="agent-status">
+          <span class="status-indicator"></span>
+          <span>Available</span>
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="alert('Analysis agent coming soon!')">
+          Analyze
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Coming Soon Section -->
+  <div class="coming-soon-section">
+    <h3 class="coming-soon-title">🚀 More Agents Coming Soon</h3>
+    <p class="coming-soon-description">
+      We're building more specialized agents including a Blog Generation Agent, 
+      Code Review Agent, and Custom Agent Builder. Stay tuned!
+    </p>
+  </div>
+</div>
+{% endblock %}
