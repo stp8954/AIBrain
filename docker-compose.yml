@@ -11,11 +11,12 @@ services:
     environment:
       - VESPA_CONFIGSERVERS=vespa-container
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/state/v1/health"]
+      # Check config server (19071) not data plane (8080) - data plane needs app deployed first
+      test: ["CMD", "curl", "-f", "http://localhost:19071/state/v1/health"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 10
+      start_period: 180s
     restart: unless-stopped
 
   nyrag:
@@ -32,6 +33,7 @@ services:
       - VESPA_URL=http://vespa:8080
       - VESPA_CONFIG_URL=http://vespa:19071
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-3-flash-preview}
       - NYRAG_AUTO_DEPLOY=true  # Auto-deploy Vespa schema on startup
     depends_on:
       vespa:
@@ -41,7 +43,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

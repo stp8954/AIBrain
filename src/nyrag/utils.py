@@ -78,6 +78,7 @@ def make_vespa_client(
     Returns:
         Configured Vespa client instance
     """
+    from urllib.parse import urlparse
     from vespa.application import Vespa
 
     kwargs: Dict[str, Any] = {}
@@ -86,12 +87,22 @@ def make_vespa_client(
     except Exception:
         sig = None
 
-    endpoint = f"{vespa_url}:{vespa_port}"
+    # Check if URL already has a port
+    parsed = urlparse(vespa_url)
+    if parsed.port:
+        # URL already has port, use it as-is
+        endpoint = vespa_url
+    else:
+        # Add port to URL
+        endpoint = f"{vespa_url}:{vespa_port}"
+
     if sig and "endpoint" in sig.parameters:
         kwargs["endpoint"] = endpoint
     else:
-        kwargs["url"] = vespa_url
-        kwargs["port"] = vespa_port
+        # For older pyvespa versions, extract base URL without port
+        base_url = f"{parsed.scheme}://{parsed.hostname}" if parsed.hostname else vespa_url
+        kwargs["url"] = base_url
+        kwargs["port"] = parsed.port if parsed.port else vespa_port
 
     if cert_path and key_path and sig and "cert" in sig.parameters:
         if "key" in sig.parameters:

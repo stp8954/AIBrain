@@ -46,8 +46,9 @@ WORKDIR /app
 COPY --chown=appuser:appuser src/ ./src/
 COPY --chown=appuser:appuser configs/ ./configs/
 
-# Create data directory for SQLite and uploads
-RUN mkdir -p /app/data && chown appuser:appuser /app/data
+# Create data directory for SQLite, uploads, and output
+RUN mkdir -p /app/data /app/data/output /app/data/uploads && \
+    chown -R appuser:appuser /app/data
 
 # Switch to non-root user
 USER appuser

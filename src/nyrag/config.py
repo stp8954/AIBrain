@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+import os
 
 import yaml
 from pydantic import BaseModel, field_validator
@@ -79,9 +80,12 @@ class Config(BaseModel):
 
     def get_output_path(self) -> Path:
         """Get the output directory path."""
+        # Use NYRAG_DATA_DIR if set (for Docker), otherwise use relative 'output'
+        data_dir = os.getenv("NYRAG_DATA_DIR", "")
+        base_path = Path(data_dir) / "output" if data_dir else Path("output")
         # Use schema name format for consistency (lowercase alphanumeric only)
         schema_name = self.get_schema_name()
-        return Path("output") / schema_name
+        return base_path / schema_name
 
     def get_app_path(self) -> Path:
         """Get the app directory path for Vespa schema."""
