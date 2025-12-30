@@ -159,7 +159,7 @@ def retrieve_rag_context(topic: str, config: Config, limit: int = 10) -> List[Di
             body = {
                 "yql": "select * from sources * where true",
                 "hits": min(limit, 5),
-                "ranking.profile": "hybrid",
+                "ranking.profile": "default",
                 "input.query(embedding)": embedding,
             }
             response = vespa_app.query(body=body, schema=notes_schema)

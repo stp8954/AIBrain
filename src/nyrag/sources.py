@@ -892,76 +892,166 @@ async def run_ingestion_job(job_id: str) -> None:
 async def _run_crawl_job(job_id: str, source: DataSourceResponse) -> None:
     """Run a URL crawl job.
 
-    This is a stub implementation that simulates crawling for the job monitoring UI.
-    Full integration with crawly.crawl_web will be added in a future iteration.
+    Uses a subprocess to run the crawler, avoiding Scrapy/Twisted signal handling issues.
 
     Args:
         job_id: UUID of the job
         source: Data source to crawl
     """
     import asyncio
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+    from urllib.parse import urlparse
+
+    from nyrag.config import Config
+    from nyrag.feed import VespaFeeder
+    from nyrag.utils import resolve_vespa_port
 
     url = source.url
     if not url:
         raise ValueError("Source URL is missing")
 
-    # Step 1: Simulate crawl initialization
+    # Step 1: Initialize
     await update_job_progress(
         job_id,
-        progress=10,
+        progress=5,
         current_task="Initializing crawler...",
         log_line=f"Starting crawl for: {url}",
     )
-    await asyncio.sleep(0.5)
 
-    # Step 2: Simulate crawling pages
+    # Extract domain from URL for allowed_domains
+    parsed = urlparse(url)
+    domain = parsed.netloc
+
+    # Create a minimal config for the feeder
+    # Use "default" as name so schema_name becomes "nyragdefault" -> but we want "nyrag"
+    # Override with the actual deployed schema name
+    config = Config(
+        name="",  # Empty name creates schema "nyrag"
+        mode="web",
+        start_loc=url,
+    )
+
+    # Initialize Vespa feeder
+    vespa_url = (os.getenv("VESPA_URL") or "").strip() or "http://localhost"
+    vespa_port = resolve_vespa_port(vespa_url)
+
     await update_job_progress(
         job_id,
-        progress=30,
-        current_task="Crawling pages...",
-        log_line="Discovering and crawling pages",
+        progress=10,
+        current_task="Connecting to Vespa...",
+        log_line=f"Initializing Vespa feeder at {vespa_url}:{vespa_port}",
     )
-    await asyncio.sleep(1)
 
-    # Simulate finding some documents
-    doc_count = 5  # Simulated document count
+    # Create feeder (this loads the embedding model)
+    feeder = VespaFeeder(config=config, redeploy=False, vespa_url=vespa_url, vespa_port=vespa_port)
+
     await update_job_progress(
         job_id,
-        progress=50,
-        current_task=f"Found {doc_count} pages",
-        log_line=f"Crawled {doc_count} pages from {url}",
+        progress=15,
+        current_task="Starting crawl...",
+        log_line=f"Crawling {url} (domain: {domain})",
     )
-    await asyncio.sleep(0.5)
 
-    # Step 3: Simulate chunking
-    await update_job_progress(
-        job_id,
-        progress=70,
-        current_task="Processing content...",
-        log_line="Extracting and chunking content",
-    )
-    await asyncio.sleep(0.5)
+    # Use a temp directory for crawl output - run crawler via subprocess
+    with tempfile.TemporaryDirectory() as output_dir:
+        output_path = Path(output_dir) / "data.jsonl"
 
-    chunk_count = doc_count * 3  # Simulated chunk count
+        # Build the crawl command using the nyrag CLI
+        # We use a simple Python script to run the crawler in a subprocess
+        crawl_script = f'''
+import sys
+sys.path.insert(0, "/app/src")
+from nyrag.crawly import crawl_web
+crawl_web(
+    start_urls=["{url}"],
+    output_dir="{output_dir}",
+    allowed_domains=["{domain}"],
+    exclude_urls=None,
+    output_file="data.jsonl",
+    respect_robots_txt=True,
+    aggressive_crawl=False,
+    follow_subdomains=False,
+    strict_mode=True,
+    user_agent_type="chrome",
+    custom_user_agent=None,
+    resume=False,
+    processed_urls=set(),
+    feeder_callback=None,
+)
+'''
+        script_path = Path(output_dir) / "crawl_script.py"
+        script_path.write_text(crawl_script)
 
-    # Step 4: Simulate indexing
-    await update_job_progress(
-        job_id,
-        progress=85,
-        current_task="Indexing to Vespa...",
-        log_line=f"Indexing {chunk_count} chunks to Vespa",
-    )
-    await asyncio.sleep(0.5)
+        await update_job_progress(
+            job_id,
+            progress=20,
+            current_task="Crawling pages...",
+            log_line="Discovering and crawling pages",
+        )
 
-    # Update source with simulated chunk count
-    await update_data_source(source.id, chunk_count=chunk_count)
+        # Run the crawl subprocess
+        proc = await asyncio.create_subprocess_exec(
+            "python", str(script_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PYTHONPATH": "/app/src"},
+        )
+        stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Unknown error"
+            logger.error(f"Crawl subprocess failed: {error_msg}")
+            raise RuntimeError(f"Crawl failed: {error_msg[:500]}")
+
+        await update_job_progress(
+            job_id,
+            progress=50,
+            current_task="Processing crawled pages...",
+            log_line="Reading crawled content",
+        )
+
+        # Read the JSONL output and feed to Vespa
+        doc_count = 0
+        chunk_count = 0
+
+        if output_path.exists():
+            with open(output_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        record = json.loads(line.strip())
+                        if record.get("content") or record.get("markdown"):
+                            # Feed to Vespa
+                            feeder.feed(record)
+                            doc_count += 1
+                            chunk_count += record.get("chunk_count", 1)
+
+                            # Update progress periodically
+                            if doc_count % 5 == 0:
+                                await update_job_progress(
+                                    job_id,
+                                    progress=50 + min(40, doc_count * 2),
+                                    current_task=f"Indexing document {doc_count}...",
+                                    log_line=f"Fed document: {record.get('loc', 'unknown')[:80]}",
+                                )
+                    except json.JSONDecodeError:
+                        continue
+
+    # Update source with actual counts
+    await update_data_source(source.id, chunk_count=doc_count)
 
     await update_job_progress(
         job_id,
         progress=95,
         current_task="Finalizing...",
-        log_line=f"Successfully indexed {chunk_count} chunks",
+        log_line=f"Successfully indexed {doc_count} documents ({chunk_count} chunks)",
     )
+
+    logger.info(f"Crawl job {job_id} completed: {doc_count} documents, {chunk_count} chunks")
+
+    logger.info(f"Crawl job {job_id} completed: {doc_count} documents, {chunk_count} chunks")
 
 
 async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> None:

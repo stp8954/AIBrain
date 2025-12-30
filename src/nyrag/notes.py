@@ -298,7 +298,7 @@ def search_notes(query: str, config: Config, limit: int = 10) -> List[Note]:
         body = {
             "yql": "select * from sources * where true",
             "hits": limit,
-            "ranking.profile": "hybrid",
+            "ranking.profile": "default",
             "input.query(embedding)": embedding,
         }
 
