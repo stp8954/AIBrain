@@ -3,7 +3,112 @@ from typing import Any, Dict, List, Literal, Optional
 import os
 
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+
+# =============================================================================
+# Pipeline Configuration Models (LangChain-based ingestion pipeline)
+# =============================================================================
+
+
+class TextEmbeddingConfig(BaseModel):
+    """Configuration for text embedding model."""
+
+    model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        description="HuggingFace model name or local path",
+    )
+    batch_size: int = Field(default=32, ge=1, le=512)
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
+
+
+class ImageEmbeddingConfig(BaseModel):
+    """Configuration for image embedding model."""
+
+    enabled: bool = False
+    model: str = Field(
+        default="sentence-transformers/clip-ViT-B-32",
+        description="Vision embedding model",
+    )
+    batch_size: int = Field(default=16, ge=1, le=128)
+    device: Literal["cpu", "cuda", "mps"] = "cpu"
+    max_dimension: int = Field(
+        default=1024,
+        ge=64,
+        le=4096,
+        description="Resize images to max dimension",
+    )
+
+
+class DoclingConfig(BaseModel):
+    """Configuration for Docling document parser.
+
+    Docling provides superior PDF/DOCX parsing with layout understanding,
+    table structure recognition, and intelligent chunking.
+    """
+
+    ocr_enabled: bool = Field(
+        default=False,
+        description="Enable OCR for scanned documents (adds latency)",
+    )
+    table_structure: bool = Field(
+        default=True,
+        description="Use TableFormer model for table structure recognition",
+    )
+    export_tables_as: Literal["markdown", "html", "json"] = Field(
+        default="markdown",
+        description="Format for table export in chunks",
+    )
+    image_extraction: bool = Field(
+        default=True,
+        description="Extract images from documents",
+    )
+
+
+class PipelineConfig(BaseModel):
+    """Configuration for the LangChain-based ingestion pipeline."""
+
+    # Document parser selection: "docling" (recommended) or "legacy" (PyPDF)
+    document_parser: Literal["docling", "legacy"] = Field(
+        default="docling",
+        description="Document parser: 'docling' for superior parsing, 'legacy' for PyPDF",
+    )
+
+    # Chunking strategy: "docling" uses native HybridChunker
+    chunking_strategy: Literal["fixed", "recursive", "semantic", "docling"] = Field(
+        default="docling",
+        description="Chunking strategy: 'docling' for context-aware chunks",
+    )
+    chunk_size: int = Field(default=512, ge=1, le=8192)
+    chunk_overlap: int = Field(default=50, ge=0)
+
+    # Docling-specific configuration
+    docling: DoclingConfig = Field(default_factory=DoclingConfig)
+
+    text_embedding: TextEmbeddingConfig = Field(default_factory=TextEmbeddingConfig)
+    image_embedding: ImageEmbeddingConfig = Field(default_factory=ImageEmbeddingConfig)
+
+    @field_validator("chunk_overlap")
+    @classmethod
+    def validate_overlap(cls, v: int, info) -> int:
+        """Ensure chunk_overlap is less than chunk_size."""
+        chunk_size = info.data.get("chunk_size", 512)
+        if v >= chunk_size:
+            raise ValueError("chunk_overlap must be less than chunk_size")
+        return v
+
+    def uses_docling(self) -> bool:
+        """Check if Docling parser is enabled."""
+        return self.document_parser == "docling"
+
+    def uses_docling_chunking(self) -> bool:
+        """Check if Docling native chunking is enabled."""
+        return self.chunking_strategy == "docling"
+
+
+# =============================================================================
+# Existing Configuration Models
+# =============================================================================
 
 
 class CrawlParams(BaseModel):
@@ -114,6 +219,31 @@ class Config(BaseModel):
             "chunk_size": self.rag_params.get("chunk_size", 1024),
             "distance_metric": self.rag_params.get("distance_metric", "angular"),
         }
+
+    def get_pipeline_config(self) -> PipelineConfig:
+        """Get pipeline configuration with backward compatibility.
+
+        If rag_params.pipeline is defined, parse it into a PipelineConfig.
+        Otherwise, return defaults that match legacy behavior.
+
+        Returns:
+            PipelineConfig instance with either explicit or default settings.
+        """
+        if self.rag_params is None:
+            return PipelineConfig()
+
+        pipeline_data = self.rag_params.get("pipeline")
+        if pipeline_data is None:
+            # Backward compatibility: use legacy chunk_size/chunk_overlap if present
+            legacy_chunk_size = self.rag_params.get("chunk_size", 512)
+            legacy_chunk_overlap = self.rag_params.get("chunk_overlap", 50)
+            return PipelineConfig(
+                chunk_size=legacy_chunk_size,
+                chunk_overlap=legacy_chunk_overlap,
+            )
+
+        # Parse nested pipeline config
+        return PipelineConfig(**pipeline_data)
 
     def is_web_mode(self) -> bool:
         """Check if config is for web crawling."""

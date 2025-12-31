@@ -78,6 +78,27 @@ class VespaSchema:
                     indexing=["attribute", "index"],
                     attribute=[f"distance-metric: {self.distance_metric}"],
                 ),
+                # Pipeline tracking fields (added for LangChain ingestion pipeline)
+                Field(
+                    name="source_type",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="chunking_strategy",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="embedding_model",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="indexed_at",
+                    type="long",
+                    indexing=["attribute", "summary"],
+                ),
             ]
         )
 
@@ -547,3 +568,182 @@ class SystemStatusResponse(BaseModel):
     queued_jobs: int = PydanticField(..., description="Number of queued jobs")
     total_data_sources: int = PydanticField(..., description="Total number of data sources")
     total_conversations: int = PydanticField(..., description="Total number of conversations")
+
+
+# =============================================================================
+# Image Document Schema (for future multimodal search - P3)
+# =============================================================================
+
+
+@dataclass
+class ImageVespaSchema:
+    """Vespa schema for image documents with embeddings.
+
+    This schema stores image embeddings separately from parent documents,
+    enabling future multimodal search capabilities.
+    """
+
+    schema_name: str
+    app_package_name: str
+    embedding_dim: int = 512  # CLIP default dimension
+    distance_metric: str = "angular"
+
+    def create_schema_fields(self) -> Schema:
+        """Create a Vespa schema for image documents."""
+        document = Document(
+            fields=[
+                Field(
+                    name="id",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="parent_document_id",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="image_hash",
+                    type="string",
+                    indexing=["attribute"],
+                ),
+                Field(
+                    name="position_in_parent",
+                    type="int",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="alt_text",
+                    type="string",
+                    indexing=["index", "summary"],
+                    index="enable-bm25",
+                ),
+                Field(
+                    name="width",
+                    type="int",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="height",
+                    type="int",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="thumbnail_path",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="image_embedding",
+                    type=f"tensor<float>(x[{self.embedding_dim}])",
+                    indexing=["attribute", "index"],
+                    attribute=[f"distance-metric: {self.distance_metric}"],
+                ),
+                Field(
+                    name="embedding_model",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="indexed_at",
+                    type="long",
+                    indexing=["attribute", "summary"],
+                ),
+            ]
+        )
+
+        schema = Schema(name=self.schema_name, document=document)
+        schema.add_field_set(FieldSet(name="default", fields=["alt_text"]))
+
+        # Add document summary
+        schema.add_document_summary(
+            DocumentSummary(
+                name="default",
+                summary_fields=[
+                    Summary(name="id"),
+                    Summary(name="parent_document_id"),
+                    Summary(name="position_in_parent"),
+                    Summary(name="alt_text"),
+                    Summary(name="width"),
+                    Summary(name="height"),
+                    Summary(name="thumbnail_path"),
+                ],
+            )
+        )
+
+        return schema
+
+    def add_rank_profile(self, schema: Schema) -> None:
+        """Add a simple vector similarity ranking for image search."""
+        common_inputs = [
+            ("query(image_embedding)", f"tensor<float>(x[{self.embedding_dim}])"),
+        ]
+
+        functions = [
+            Function(
+                name="image_vec",
+                expression="attribute(image_embedding)",
+            ),
+            Function(
+                name="vector_norms",
+                expression="sqrt(sum(pow(t, 2), x))",
+                args=["t"],
+            ),
+            Function(
+                name="sim_score",
+                expression=(
+                    "reduce(query(image_embedding) * image_vec(), sum, x) / "
+                    "(vector_norms(image_vec()) * vector_norms(query(image_embedding)))"
+                ),
+            ),
+            Function(
+                name="text_score",
+                expression="(2 / 3.141592653589793) * atan(bm25(alt_text))",
+            ),
+            Function(
+                name="combined_score",
+                expression="0.7 * sim_score() + 0.3 * text_score()",
+            ),
+        ]
+
+        schema.add_rank_profile(
+            RankProfile(
+                name="default",
+                inputs=common_inputs,
+                functions=functions,
+                summary_features=["sim_score", "text_score", "combined_score"],
+                first_phase="combined_score()",
+            )
+        )
+
+    def get_package(self) -> ApplicationPackage:
+        """Get the Vespa application package with image schema."""
+        schema = self.create_schema_fields()
+        self.add_rank_profile(schema)
+        app_package = ApplicationPackage(name=self.app_package_name, schema=[schema])
+        return app_package
+
+
+def generate_image_schema(
+    project_name: str, embedding_dim: int = 512, distance_metric: str = "angular"
+) -> ImageVespaSchema:
+    """Generate a Vespa schema for image document storage.
+
+    Args:
+        project_name: The project name (used for schema naming).
+        embedding_dim: Dimension of the image embedding vectors (CLIP default: 512).
+        distance_metric: Distance metric for vector similarity.
+
+    Returns:
+        An ImageVespaSchema instance configured for the project.
+    """
+    clean_name = project_name.replace("-", "").replace("_", "").lower()
+    schema_name = f"nyrag{clean_name}images"
+    app_package_name = f"nyrag{clean_name}"[:20]
+
+    return ImageVespaSchema(
+        schema_name=schema_name,
+        app_package_name=app_package_name,
+        embedding_dim=embedding_dim,
+        distance_metric=distance_metric,
+    )

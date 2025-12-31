@@ -382,7 +382,28 @@ function renderMarkdown(el, text) {
       mangle: false,
       headerIds: false,
     });
-    el.innerHTML = window.DOMPurify ? window.DOMPurify.sanitize(html) : html;
+    // Configure DOMPurify to allow images with necessary attributes
+    const purifyConfig = {
+      ALLOWED_TAGS: [
+        "h1", "h2", "h3", "h4", "h5", "h6",
+        "p", "br", "hr",
+        "ul", "ol", "li",
+        "blockquote", "pre", "code",
+        "strong", "em", "b", "i", "u", "s", "del",
+        "a", "img",
+        "table", "thead", "tbody", "tr", "th", "td",
+        "span", "div",
+      ],
+      ALLOWED_ATTR: [
+        "href", "target", "rel",
+        "src", "alt", "title", "width", "height", "loading",
+        "class", "id",
+      ],
+      ALLOW_DATA_ATTR: false,
+    };
+    el.innerHTML = window.DOMPurify
+      ? window.DOMPurify.sanitize(html, purifyConfig)
+      : html;
   } else {
     el.textContent = text;
   }

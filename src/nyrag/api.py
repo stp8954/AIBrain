@@ -1006,6 +1006,46 @@ async def add_message_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _check_mixed_strategies() -> Optional[str]:
+    """Check if documents in Vespa have mixed chunking strategies.
+
+    Returns:
+        Warning message if mixed strategies detected, None otherwise.
+    """
+    try:
+        # Query to group by chunking_strategy
+        yql = "select * from sources * where true | all(group(chunking_strategy) each(output(count())))"
+        res = vespa_app.query(
+            body={"yql": yql, "hits": 0},
+            schema=settings["schema_name"],
+        )
+
+        # Parse group results
+        root = res.json.get("root", {})
+        children = root.get("children", [])
+        if not children:
+            return None
+
+        # Find grouping results
+        strategies = []
+        for child in children:
+            if "children" in child:
+                for group in child.get("children", []):
+                    value = group.get("value")
+                    if value:
+                        strategies.append(value)
+
+        if len(strategies) > 1:
+            return (
+                f"Documents indexed with mixed chunking strategies: {', '.join(strategies)}. "
+                "Search results may be inconsistent. Consider re-indexing with a single strategy."
+            )
+    except Exception as e:
+        logger.debug(f"Could not check for mixed strategies: {e}")
+
+    return None
+
+
 @app.post("/search")
 async def search(req: SearchRequest) -> Dict[str, Any]:
     """Query Vespa using YQL with a precomputed query embedding."""
@@ -1026,7 +1066,15 @@ async def search(req: SearchRequest) -> Dict[str, Any]:
         detail = getattr(vespa_response, "json", vespa_response)
         raise HTTPException(status_code=status_code, detail=detail)
 
-    return vespa_response.json
+    result = vespa_response.json
+
+    # Check for mixed strategies and add warning if detected
+    mixed_warning = _check_mixed_strategies()
+    if mixed_warning:
+        result["_warnings"] = [mixed_warning]
+        logger.warning(f"Search returned with mixed-strategy warning: {mixed_warning}")
+
+    return result
 
 
 class ChatRequest(BaseModel):

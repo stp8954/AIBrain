@@ -222,6 +222,76 @@ Open http://localhost:8000/chat
 | `distance_metric` | str | `angular` | Distance metric |
 | `max_tokens` | int | `8192` | Max tokens per document |
 
+### Pipeline Parameters (`rag_params.pipeline`)
+
+The LangChain-based ingestion pipeline provides advanced configuration options:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `chunking_strategy` | str | `recursive` | Chunking strategy: `fixed`, `recursive`, `semantic` |
+| `chunk_size` | int | `512` | Chunk size for pipeline (overrides rag_params.chunk_size) |
+| `chunk_overlap` | int | `50` | Overlap between chunks |
+
+**Chunking Strategies:**
+- `fixed`: Character-based fixed-size splitting. Best for code and structured data.
+- `recursive`: Smart splitting by paragraphs, sentences, words (default). Best for general content.
+- `semantic`: Sentence-based NLP splitting using spacy. Best for articles and documentation.
+
+#### Text Embedding (`rag_params.pipeline.text_embedding`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | str | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace model name |
+| `batch_size` | int | `32` | Batch size for embedding |
+| `device` | str | `cpu` | Device: `cpu`, `cuda`, `mps` |
+
+#### Image Embedding (`rag_params.pipeline.image_embedding`)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable image embedding for multimodal search |
+| `model` | str | `sentence-transformers/clip-ViT-B-32` | CLIP model for images |
+| `batch_size` | int | `16` | Batch size for image embedding |
+| `device` | str | `cpu` | Device: `cpu`, `cuda`, `mps` |
+| `max_dimension` | int | `1024` | Resize images to max dimension |
+
+**Example with pipeline configuration:**
+
+```yaml
+rag_params:
+  embedding_model: sentence-transformers/all-mpnet-base-v2
+  embedding_dim: 768
+
+  pipeline:
+    chunking_strategy: semantic
+    chunk_size: 512
+    chunk_overlap: 50
+
+    text_embedding:
+      model: sentence-transformers/all-mpnet-base-v2
+      batch_size: 32
+      device: cuda
+
+    image_embedding:
+      enabled: true
+      model: sentence-transformers/clip-ViT-B-32
+      device: cuda
+```
+
+**Configuration Validation:**
+
+You can validate your pipeline configuration before processing:
+
+```bash
+nyrag --config configs/example.yml --validate
+```
+
+This checks:
+- Chunking strategy is valid
+- Embedding model can be loaded
+- Embedding dimensions match Vespa schema
+- Image embedding model (if enabled)
+
 ### Notes Parameters (`notes_params`)
 
 | Parameter | Type | Default | Description |
