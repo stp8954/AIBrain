@@ -4,9 +4,13 @@
 FROM python:3.11-slim as builder
 
 # Install build dependencies
+# Note: libgl1-mesa-dev and poppler are needed for Docling PDF processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    libgl1-mesa-dev \
+    libglib2.0-0 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Create virtual environment
@@ -22,14 +26,22 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir .
 
+# Pre-download the embedding model for faster first-run
+# This caches the model in the Docker image
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 # ============================================
 # Production stage
 # ============================================
 FROM python:3.11-slim
 
 # Install runtime dependencies
+# Note: libgl1, libglib2.0-0, and poppler-utils are needed for Docling PDF processing
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    libgl1 \
+    libglib2.0-0 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy virtual environment from builder
@@ -38,6 +50,9 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 # Create app user for security
 RUN useradd --create-home --shell /bin/bash appuser
+
+# Copy pre-downloaded HuggingFace models from builder
+COPY --from=builder --chown=appuser:appuser /root/.cache/huggingface /home/appuser/.cache/huggingface
 
 # Set working directory
 WORKDIR /app
@@ -60,6 +75,7 @@ ENV VESPA_URL=http://vespa:8080
 ENV VESPA_CONFIG_URL=http://vespa:19071
 ENV NYRAG_DATA_DIR=/app/data
 ENV NYRAG_AUTO_DEPLOY=true
+ENV HF_HOME=/home/appuser/.cache/huggingface
 
 # Expose port
 EXPOSE 8000

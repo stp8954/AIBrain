@@ -11,6 +11,7 @@ from nyrag.crawly import crawl_web
 from nyrag.deploy import deploy_app_package
 from nyrag.feed import VespaFeeder
 from nyrag.logger import logger
+from nyrag.pipeline.validation import validate_pipeline_config
 from nyrag.schema import VespaSchema
 from nyrag.utils import resolve_vespa_port
 
@@ -89,6 +90,17 @@ def process_from_config(config: Config, resume: bool = False):
         config: Configuration object
         resume: If True, skip already processed URLs/files
     """
+    # Validate pipeline configuration before processing
+    logger.info("Validating pipeline configuration...")
+    validation_result = validate_pipeline_config(config, check_embedding_model=True, check_dimensions=True)
+    if not validation_result.valid:
+        logger.error(f"Pipeline configuration validation failed: {validation_result.message}")
+        raise SystemExit(1)
+
+    # Log any warnings
+    for warning in validation_result.warnings:
+        logger.warning(f"Configuration warning: {warning}")
+
     output_dir = config.get_output_path()
 
     # Check if project already exists
@@ -189,12 +201,18 @@ def _process_web(config: Config, output_dir: Path, resume: bool = False):
         jsonl_file = output_dir / "data.jsonl"
         processed_urls = load_processed_locations(jsonl_file)
 
-    # Initialize Vespa feeder
+    # Initialize Vespa feeder (still used via callback for web crawling)
     logger.info("Initializing Vespa feeder...")
     vespa_url = (os.getenv("VESPA_URL") or "").strip() or "http://localhost"
     vespa_port = resolve_vespa_port(vespa_url)
     feeder = VespaFeeder(config=config, redeploy=False, vespa_url=vespa_url, vespa_port=vespa_port)
-    feeder_callback = feeder.feed
+
+    # Create a callback that adds source_type for web URLs
+    def feeder_callback(record: dict) -> bool:
+        # Ensure source_type is set for web documents
+        if "source_type" not in record:
+            record["source_type"] = "url"
+        return feeder.feed(record)
 
     try:
         crawl_web(
@@ -281,7 +299,8 @@ def _process_documents(config: Config, output_dir: Path, resume: bool = False):
         logger.error("No documents found to process")
         return
 
-    logger.info(f"Processing {len(documents)} document(s)")
+    total_docs = len(documents)
+    logger.info(f"Processing {total_docs} document(s)")
 
     # Setup output file
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -315,9 +334,14 @@ def _process_documents(config: Config, output_dir: Path, resume: bool = False):
     success_count = 0
     error_count = 0
 
-    for doc_file in documents:
+    for idx, doc_file in enumerate(documents, 1):
+        # Log progress every 10 documents or at key points
+        if idx == 1 or idx % 10 == 0 or idx == total_docs:
+            progress_pct = (idx / total_docs) * 100
+            logger.info(f"Progress: {idx}/{total_docs} ({progress_pct:.1f}%)")
+
         try:
-            logger.info(f"Processing: {doc_file.name}")
+            logger.debug(f"Processing: {doc_file.name}")
 
             # Try to convert the file
             try:
@@ -341,6 +365,15 @@ def _process_documents(config: Config, output_dir: Path, resume: bool = False):
             save_to_jsonl(loc, result.markdown, title, output_dir)
             success_count += 1
 
+            # Determine source_type from file extension
+            suffix = doc_file.suffix.lower()
+            if suffix == ".pdf":
+                source_type = "pdf"
+            elif suffix in [".md", ".markdown"]:
+                source_type = "markdown"
+            else:
+                source_type = "text"
+
             # Feed to Vespa if requested
             if feeder and result.markdown:
                 try:
@@ -349,6 +382,7 @@ def _process_documents(config: Config, output_dir: Path, resume: bool = False):
                             "loc": loc,
                             "content": result.markdown,
                             "title": title,
+                            "source_type": source_type,
                         }
                     )
                 except Exception as e:
@@ -358,7 +392,12 @@ def _process_documents(config: Config, output_dir: Path, resume: bool = False):
             logger.error(f"Failed to process {doc_file}: {str(e)}")
             error_count += 1
 
-    logger.success(f"Document processing completed: {success_count} successful, {error_count} failed")
+    # Final summary with percentage
+    success_pct = (success_count / total_docs * 100) if total_docs > 0 else 0
+    logger.success(
+        f"Document processing completed: {success_count}/{total_docs} succeeded ({success_pct:.1f}%), "
+        f"{error_count} failed"
+    )
 
 
 def _collect_documents(directory: Path, doc_params) -> List[Path]:

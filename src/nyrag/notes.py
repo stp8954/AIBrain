@@ -19,26 +19,34 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 
 from nyrag.config import Config
 from nyrag.logger import get_logger
-from nyrag.utils import DEFAULT_EMBEDDING_MODEL, get_vespa_tls_config, make_vespa_client, resolve_vespa_port
+from nyrag.pipeline.embeddings import TextEmbedder, get_text_embedder
+from nyrag.utils import get_vespa_tls_config, make_vespa_client, resolve_vespa_port
 
 
 logger = get_logger("notes")
 
-# Module-level embedding model (lazy loaded)
-_embedding_model: Optional[SentenceTransformer] = None
+# Module-level text embedder (lazy loaded)
+_text_embedder: Optional[TextEmbedder] = None
 
 
-def _get_embedding_model(model_name: str = DEFAULT_EMBEDDING_MODEL) -> SentenceTransformer:
-    """Get or create the embedding model singleton."""
-    global _embedding_model
-    if _embedding_model is None:
-        logger.info(f"Loading embedding model: {model_name}")
-        _embedding_model = SentenceTransformer(model_name)
-    return _embedding_model
+def _get_text_embedder(config: Config) -> TextEmbedder:
+    """Get or create the text embedder singleton for notes.
+
+    Args:
+        config: NyRAG configuration.
+
+    Returns:
+        TextEmbedder instance configured from the pipeline config.
+    """
+    global _text_embedder
+    if _text_embedder is None:
+        pipeline_config = config.get_pipeline_config()
+        logger.info(f"Initializing text embedder for notes: {pipeline_config.text_embedding.model}")
+        _text_embedder = get_text_embedder(pipeline_config)
+    return _text_embedder
 
 
 class Note(BaseModel):
@@ -146,14 +154,12 @@ def index_note_vespa(note: Note, config: Config) -> bool:
         True if indexing succeeded, False otherwise.
     """
     try:
-        # Get embedding model
-        rag_params = config.rag_params or {}
-        model_name = rag_params.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
-        model = _get_embedding_model(model_name)
+        # Get text embedder from shared pipeline
+        embedder = _get_text_embedder(config)
 
         # Generate embedding from title + content
         text_to_embed = f"{note.title}\n\n{note.content}"
-        embedding = model.encode(text_to_embed, convert_to_numpy=True).tolist()
+        embedding = embedder.embed_text(text_to_embed)
 
         # Connect to Vespa
         vespa_url = os.getenv("VESPA_URL", "http://localhost")
@@ -279,13 +285,11 @@ def search_notes(query: str, config: Config, limit: int = 10) -> List[Note]:
         List of matching notes.
     """
     try:
-        # Get embedding model
-        rag_params = config.rag_params or {}
-        model_name = rag_params.get("embedding_model", DEFAULT_EMBEDDING_MODEL)
-        model = _get_embedding_model(model_name)
+        # Get text embedder from shared pipeline
+        embedder = _get_text_embedder(config)
 
         # Generate query embedding
-        embedding = model.encode(query, convert_to_numpy=True).tolist()
+        embedding = embedder.embed_text(query)
 
         # Connect to Vespa
         vespa_url = os.getenv("VESPA_URL", "http://localhost")

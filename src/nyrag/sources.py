@@ -347,8 +347,10 @@ async def save_uploaded_file(
     if file_type is None:
         raise ValueError(f"Unsupported file type: {filename}")
 
-    # Generate safe filename
-    safe_filename = generate_safe_filename(filename)
+    # Generate safe filename with unique ID
+    import uuid
+    unique_id = str(uuid.uuid4())[:8]
+    safe_filename = generate_safe_filename(filename, unique_id)
 
     # Get uploads directory
     uploads_dir = get_uploads_dir(base_path)
@@ -889,10 +891,40 @@ async def run_ingestion_job(job_id: str) -> None:
         await _try_start_next_job()
 
 
+def _is_pdf_url(url: str) -> bool:
+    """Check if URL points to a PDF file.
+
+    Args:
+        url: URL to check.
+
+    Returns:
+        True if URL appears to be a PDF.
+    """
+    from urllib.parse import urlparse
+    import requests
+
+    # Check URL path for .pdf extension
+    parsed = urlparse(url)
+    if parsed.path.lower().endswith('.pdf'):
+        return True
+
+    # Check Content-Type header
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        content_type = response.headers.get('Content-Type', '').lower()
+        if 'application/pdf' in content_type:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 async def _run_crawl_job(job_id: str, source: DataSourceResponse) -> None:
     """Run a URL crawl job.
 
     Uses a subprocess to run the crawler, avoiding Scrapy/Twisted signal handling issues.
+    For PDF URLs, uses the PDF loader directly instead of Scrapy.
 
     Args:
         job_id: UUID of the job
@@ -917,9 +949,14 @@ async def _run_crawl_job(job_id: str, source: DataSourceResponse) -> None:
     await update_job_progress(
         job_id,
         progress=5,
-        current_task="Initializing crawler...",
+        current_task="Initializing...",
         log_line=f"Starting crawl for: {url}",
     )
+
+    # Check if URL points to a PDF - use PDF loader instead of Scrapy
+    if _is_pdf_url(url):
+        await _run_pdf_url_job(job_id, source)
+        return
 
     # Extract domain from URL for allowed_domains
     parsed = urlparse(url)
@@ -1016,6 +1053,7 @@ crawl_web(
         # Read the JSONL output and feed to Vespa
         doc_count = 0
         chunk_count = 0
+        feed_failures = []
 
         if output_path.exists():
             with open(output_path, "r", encoding="utf-8") as f:
@@ -1023,17 +1061,21 @@ crawl_web(
                     try:
                         record = json.loads(line.strip())
                         if record.get("content") or record.get("markdown"):
-                            # Feed to Vespa
-                            feeder.feed(record)
-                            doc_count += 1
-                            chunk_count += record.get("chunk_count", 1)
+                            # Feed to Vespa and check result
+                            feed_success = feeder.feed(record)
+                            if feed_success:
+                                doc_count += 1
+                                chunk_count += record.get("chunk_count", 1)
+                            else:
+                                feed_failures.append(record.get("loc", "unknown")[:80])
+                                logger.error(f"Failed to feed document: {record.get('loc', 'unknown')[:80]}")
 
                             # Update progress periodically
-                            if doc_count % 5 == 0:
+                            if (doc_count + len(feed_failures)) % 5 == 0:
                                 await update_job_progress(
                                     job_id,
-                                    progress=50 + min(40, doc_count * 2),
-                                    current_task=f"Indexing document {doc_count}...",
+                                    progress=50 + min(40, (doc_count + len(feed_failures)) * 2),
+                                    current_task=f"Indexing document {doc_count + len(feed_failures)}...",
                                     log_line=f"Fed document: {record.get('loc', 'unknown')[:80]}",
                                 )
                     except json.JSONDecodeError:
@@ -1041,6 +1083,11 @@ crawl_web(
 
     # Update source with actual counts
     await update_data_source(source.id, chunk_count=doc_count)
+
+    # Fail the job if any documents failed to feed
+    if feed_failures:
+        error_msg = f"Failed to index {len(feed_failures)} document(s). First failure: {feed_failures[0]}"
+        raise RuntimeError(error_msg)
 
     await update_job_progress(
         job_id,
@@ -1051,21 +1098,121 @@ crawl_web(
 
     logger.info(f"Crawl job {job_id} completed: {doc_count} documents, {chunk_count} chunks")
 
-    logger.info(f"Crawl job {job_id} completed: {doc_count} documents, {chunk_count} chunks")
+
+async def _run_pdf_url_job(job_id: str, source: DataSourceResponse) -> None:
+    """Run a PDF URL processing job.
+
+    Uses Docling (default) or legacy PDF loader to properly parse PDF content from URLs.
+
+    Args:
+        job_id: UUID of the job
+        source: Data source (PDF URL) to process
+    """
+    import os
+
+    from nyrag.config import Config, PipelineConfig
+    from nyrag.feed import VespaFeeder
+    from nyrag.pipeline.loaders import get_loader_for_source
+    from nyrag.utils import resolve_vespa_port
+
+    url = source.url
+    if not url:
+        raise ValueError("Source URL is missing")
+
+    # Get pipeline config (determines Docling vs legacy)
+    pipeline_config = PipelineConfig()
+    parser_name = "Docling" if pipeline_config.uses_docling() else "Legacy"
+
+    await update_job_progress(
+        job_id,
+        progress=10,
+        current_task=f"Loading PDF with {parser_name}...",
+        log_line=f"Loading PDF from: {url} (parser: {parser_name})",
+    )
+
+    # Create config for feeder
+    config = Config(
+        name="",
+        mode="web",
+        start_loc=url,
+    )
+
+    # Initialize Vespa feeder
+    vespa_url = (os.getenv("VESPA_URL") or "").strip() or "http://localhost"
+    vespa_port = resolve_vespa_port(vespa_url)
+
+    await update_job_progress(
+        job_id,
+        progress=15,
+        current_task="Connecting to Vespa...",
+        log_line=f"Initializing Vespa feeder at {vespa_url}:{vespa_port}",
+    )
+
+    feeder = VespaFeeder(config=config, redeploy=False, vespa_url=vespa_url, vespa_port=vespa_port)
+
+    await update_job_progress(
+        job_id,
+        progress=25,
+        current_task="Downloading and parsing PDF...",
+        log_line=f"Using {parser_name} parser for PDF content",
+    )
+
+    # Use loader based on pipeline config (Docling or legacy)
+    loader = get_loader_for_source("url", extract_images=True, pipeline_config=pipeline_config)
+    try:
+        loaded_doc = loader.load(url)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load PDF from URL: {e}")
+
+    await update_job_progress(
+        job_id,
+        progress=50,
+        current_task="Indexing document...",
+        log_line=f"Loaded {len(loaded_doc.content)} chars from PDF",
+    )
+
+    # Prepare record for feeding
+    record = {
+        "content": loaded_doc.content,
+        "loc": url,
+        "title": loaded_doc.title or source.name or "",
+        "source_type": "url",
+    }
+
+    # Feed to Vespa
+    feed_success = feeder.feed(record)
+    if not feed_success:
+        raise RuntimeError(f"Failed to index PDF document to Vespa: {url}")
+
+    # Update source counts
+    await update_data_source(source.id, chunk_count=1)
+
+    await update_job_progress(
+        job_id,
+        progress=95,
+        current_task="Finalizing...",
+        log_line=f"Successfully indexed PDF document",
+    )
+
+    logger.info(f"PDF URL job {job_id} completed: 1 document indexed")
 
 
 async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> None:
     """Run a file processing job.
 
-    This is a stub implementation that simulates file processing for the job monitoring UI.
-    Full integration with MarkItDown will be added in a future iteration.
+    Uses Docling (default) or legacy LangChain document loaders for file processing.
 
     Args:
         job_id: UUID of the job
         source: Data source (file) to process
     """
-    import asyncio
+    import os
     from pathlib import Path
+
+    from nyrag.config import Config, PipelineConfig
+    from nyrag.feed import VespaFeeder
+    from nyrag.pipeline.loaders import get_loader_for_source
+    from nyrag.utils import resolve_vespa_port
 
     file_path = source.file_path
     if not file_path:
@@ -1073,63 +1220,119 @@ async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> N
 
     file_name = Path(file_path).name
 
-    # Step 1: Simulate file reading
+    # Get pipeline config (determines Docling vs legacy)
+    pipeline_config = PipelineConfig()
+    parser_name = "Docling" if pipeline_config.uses_docling() else "Legacy"
+
+    # Step 1: Initialize
+    await update_job_progress(
+        job_id,
+        progress=5,
+        current_task="Initializing...",
+        log_line=f"Starting file processing for: {file_name} (parser: {parser_name})",
+    )
+
+    # Create a minimal config for the feeder
+    config = Config(
+        name="",  # Empty name creates schema "nyrag"
+        mode="docs",
+        start_loc=file_path,
+    )
+
+    # Initialize Vespa feeder
+    vespa_url = (os.getenv("VESPA_URL") or "").strip() or "http://localhost"
+    vespa_port = resolve_vespa_port(vespa_url)
+
     await update_job_progress(
         job_id,
         progress=10,
-        current_task="Reading file...",
-        log_line=f"Opening: {file_name}",
+        current_task="Connecting to Vespa...",
+        log_line=f"Initializing Vespa feeder at {vespa_url}:{vespa_port}",
     )
-    await asyncio.sleep(0.5)
 
-    # Step 2: Simulate content extraction
+    # Create feeder (this loads the embedding model)
+    feeder = VespaFeeder(config=config, redeploy=False, vespa_url=vespa_url, vespa_port=vespa_port)
+
+    # Step 2: Load document using appropriate loader
     await update_job_progress(
         job_id,
-        progress=30,
-        current_task="Extracting content...",
-        log_line=f"Extracting text from {source.source_type} file",
+        progress=20,
+        current_task=f"Loading with {parser_name}...",
+        log_line=f"Loading {source.source_type} file: {file_name} using {parser_name} parser",
     )
-    await asyncio.sleep(0.5)
 
-    # Simulate extracted documents
-    doc_count = 1
+    try:
+        loader = get_loader_for_source(
+            source.source_type, extract_images=True, pipeline_config=pipeline_config
+        )
+        loaded_doc = loader.load(file_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load document: {e}")
+
     await update_job_progress(
         job_id,
-        progress=50,
-        current_task=f"Extracted {doc_count} document(s)",
-        log_line=f"Extracted {doc_count} document(s) from {file_name}",
+        progress=40,
+        current_task="Document loaded",
+        log_line=f"Loaded document: {len(loaded_doc.content)} chars, {len(loaded_doc.images)} images",
     )
-    await asyncio.sleep(0.5)
 
-    # Step 3: Simulate chunking
+    # Step 3: Feed document to Vespa
     await update_job_progress(
         job_id,
-        progress=70,
-        current_task="Chunking content...",
-        log_line="Splitting content into chunks",
-    )
-    await asyncio.sleep(0.5)
-
-    chunk_count = 8  # Simulated chunk count
-
-    # Step 4: Simulate indexing
-    await update_job_progress(
-        job_id,
-        progress=85,
+        progress=60,
         current_task="Indexing to Vespa...",
-        log_line=f"Indexing {chunk_count} chunks to Vespa",
+        log_line="Generating embeddings and feeding to Vespa",
     )
-    await asyncio.sleep(0.5)
 
-    # Update source with simulated chunk count
+    # Prepare record for feeding
+    record = {
+        "content": loaded_doc.content,
+        "loc": loaded_doc.source_loc,
+        "title": loaded_doc.title or file_name,
+        "source_type": loaded_doc.source_type,
+    }
+
+    # Feed to Vespa and check result
+    feed_success = feeder.feed(record)
+
+    if not feed_success:
+        raise RuntimeError(f"Failed to index document to Vespa: {file_name}")
+
+    # Get chunk count from the prepared record (it's set during feed)
+    # We need to re-calculate since feed doesn't expose it
+    chunk_count = len(feeder.chunking_strategy.split(loaded_doc.content))
+
+    await update_job_progress(
+        job_id,
+        progress=80,
+        current_task=f"Indexed {chunk_count} chunks",
+        log_line=f"Successfully indexed document with {chunk_count} chunks",
+    )
+
+    # Step 4: Handle images if any
+    if loaded_doc.images:
+        await update_job_progress(
+            job_id,
+            progress=85,
+            current_task=f"Processing {len(loaded_doc.images)} images...",
+            log_line=f"Found {len(loaded_doc.images)} images to process",
+        )
+
+        # Image indexing is handled by feed_images if enabled
+        # For now, just log that images were found
+        logger.info(f"Document has {len(loaded_doc.images)} images (image indexing available via feeder)")
+
+    # Update source with actual chunk count
     await update_data_source(source.id, chunk_count=chunk_count)
 
     await update_job_progress(
         job_id,
         progress=95,
         current_task="Finalizing...",
-        log_line=f"Successfully indexed {chunk_count} chunks",
+        log_line=f"Successfully indexed 1 document with {chunk_count} chunks",
     )
+
+    logger.info(f"File processing job {job_id} completed: 1 document, {chunk_count} chunks")
 
 
 async def start_job(job_id: str) -> bool:

@@ -340,6 +340,35 @@ body {
   margin-bottom: 0;
 }
 
+/* Images in chat messages */
+.assistant-text img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  margin: 12px 0;
+  display: block;
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.assistant-text img:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+/* Image caption style for alt text */
+.assistant-text img + em,
+.assistant-text img + p > em:first-child {
+  display: block;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: -8px;
+  margin-bottom: 12px;
+}
+
 /* Code blocks */
 pre {
   background: var(--code-bg);

@@ -27,6 +27,26 @@ rag_params:
   distance_metric: angular        # Distance metric: angular, euclidean, etc. (default: angular)
   max_tokens: 8192
 
+  # Optional: LangChain-based pipeline configuration
+  pipeline:
+    chunking_strategy: recursive    # Chunking strategy: fixed, recursive, semantic (default: recursive)
+    chunk_size: 1024                # Chunk size for pipeline (overrides above if set)
+    chunk_overlap: 50               # Chunk overlap for pipeline
+
+    # Text embedding configuration
+    text_embedding:
+      model: sentence-transformers/all-MiniLM-L6-v2  # HuggingFace model name
+      batch_size: 32                # Batch size for embedding (default: 32)
+      device: cpu                   # Device: cpu, cuda, mps (default: cpu)
+
+    # Image embedding configuration (optional, for multimodal search)
+    image_embedding:
+      enabled: false                # Enable image embedding (default: false)
+      model: sentence-transformers/clip-ViT-B-32  # CLIP model for images
+      batch_size: 16                # Batch size for image embedding
+      device: cpu                   # Device: cpu, cuda, mps
+      max_dimension: 1024           # Resize images to max dimension (default: 1024)
+
 # Optional: Notes and blog generation parameters
 notes_params:
   storage_path: ./data/notes       # Directory for notes JSONL storage (default: ./data/notes)

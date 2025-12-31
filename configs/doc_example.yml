@@ -24,3 +24,23 @@ rag_params:
   chunk_overlap: 50
   distance_metric: angular        # Distance metric: angular, euclidean, etc. (default: angular)
   max_tokens: 8192
+
+  # Optional: LangChain-based pipeline configuration
+  pipeline:
+    chunking_strategy: semantic     # Chunking strategy: fixed, recursive, semantic (default: recursive)
+    chunk_size: 512                 # Chunk size for pipeline
+    chunk_overlap: 50               # Chunk overlap for pipeline
+
+    # Text embedding configuration
+    text_embedding:
+      model: sentence-transformers/all-mpnet-base-v2  # HuggingFace model name
+      batch_size: 32                # Batch size for embedding (default: 32)
+      device: cpu                   # Device: cpu, cuda, mps (default: cpu)
+
+    # Image embedding configuration (enabled for document processing)
+    image_embedding:
+      enabled: true                 # Enable image embedding for PDFs
+      model: sentence-transformers/clip-ViT-B-32  # CLIP model for images
+      batch_size: 16                # Batch size for image embedding
+      device: cpu                   # Device: cpu, cuda, mps
+      max_dimension: 1024           # Resize images to max dimension

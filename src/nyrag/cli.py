@@ -3,6 +3,7 @@ import sys
 
 from nyrag.config import Config
 from nyrag.logger import logger
+from nyrag.pipeline.validation import PipelineValidationError, validate_pipeline_config
 from nyrag.process import process_from_config
 
 
@@ -26,6 +27,12 @@ def main():
         help="Resume from existing crawl/processing data (skip already processed URLs/files)",
     )
 
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate pipeline configuration and exit without processing",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -35,6 +42,19 @@ def main():
         logger.info(f"Project: {config.name}")
         logger.info(f"Mode: {config.mode}")
         logger.info(f"Output directory: {config.get_output_path()}")
+
+        # Validate-only mode
+        if args.validate:
+            logger.info("Validation mode enabled - checking configuration...")
+            result = validate_pipeline_config(config)
+            if result.valid:
+                logger.success("Configuration validation passed!")
+                for warning in result.warnings:
+                    logger.warning(f"Warning: {warning}")
+                sys.exit(0)
+            else:
+                logger.error(f"Configuration validation failed: {result.message}")
+                sys.exit(1)
 
         if args.resume:
             logger.info("Resume mode enabled - will skip already processed items")
