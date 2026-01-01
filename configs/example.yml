@@ -39,13 +39,22 @@ rag_params:
       batch_size: 32                # Batch size for embedding (default: 32)
       device: cpu                   # Device: cpu, cuda, mps (default: cpu)
 
-    # Image embedding configuration (optional, for multimodal search)
+    # Image embedding configuration (for multimodal search)
+    # When enabled, images extracted from PDFs are embedded using CLIP
+    # and indexed alongside text for image retrieval in chat responses
     image_embedding:
-      enabled: false                # Enable image embedding (default: false)
-      model: sentence-transformers/clip-ViT-B-32  # CLIP model for images
+      enabled: true                 # Enable image embedding (default: true)
+      model: sentence-transformers/clip-ViT-B-32  # CLIP model for images (512-dim)
       batch_size: 16                # Batch size for image embedding
-      device: cpu                   # Device: cpu, cuda, mps
-      max_dimension: 1024           # Resize images to max dimension (default: 1024)
+      device: cpu                   # Device: cpu, cuda, mps (use cuda for faster processing)
+      max_dimension: 1024           # Resize images to max dimension before embedding (default: 1024)
+
+    # Background processing configuration
+    # Controls concurrent ingestion jobs and image processing limits
+    background:
+      max_concurrent_jobs: 2        # Maximum simultaneous ingestion jobs (default: 2)
+      enable_image_indexing: true   # Enable image extraction during ingestion (default: true)
+      max_images_per_doc: 50        # Maximum images to extract per document (default: 50)
 
 # Optional: Notes and blog generation parameters
 notes_params:
@@ -57,3 +66,34 @@ blog_params:
   output_path: ./data/blogs        # Directory for generated blog files (default: ./data/blogs)
   default_template: tutorial       # Default blog template: tutorial, opinion, roundup, technical
   include_sources: true            # Include source citations in generated blogs (default: true)
+
+# =============================================================================
+# Image Indexing and Retrieval Configuration
+# =============================================================================
+#
+# NyRAG supports extracting images from documents (PDFs, etc.) and indexing
+# them for multimodal search. This allows users to find relevant diagrams,
+# charts, and figures based on text queries.
+#
+# How it works:
+# 1. Documents are processed by Docling which extracts embedded images
+# 2. Each image is embedded using CLIP (text-image alignment model)
+# 3. Images are stored in data/images/{source_id}/{hash}.{format}
+# 4. Embeddings are indexed in Vespa alongside text chunks
+# 5. Chat queries can retrieve both text and images (include_images=true)
+#
+# Storage locations:
+# - Images: data/images/           (file system)
+# - Metadata: nyrag.db             (SQLite image_chunks table)
+# - Embeddings: Vespa              (image_embedding field)
+#
+# API endpoints:
+# - GET /api/images/{source_id}/{filename}    Serve image files
+# - GET /api/sources/{source_id}/images       List images for a source
+# - POST /chat with include_images=true       Retrieve images in responses
+#
+# Performance considerations:
+# - CLIP model loading adds ~2-3s startup time
+# - Image embedding is ~100-200ms per image on CPU
+# - Use device: cuda for 10x faster embedding on GPU
+# - max_images_per_doc limits memory usage for image-heavy documents

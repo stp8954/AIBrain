@@ -25,7 +25,7 @@ class TextEmbeddingConfig(BaseModel):
 class ImageEmbeddingConfig(BaseModel):
     """Configuration for image embedding model."""
 
-    enabled: bool = False
+    enabled: bool = True
     model: str = Field(
         default="sentence-transformers/clip-ViT-B-32",
         description="Vision embedding model",
@@ -37,6 +37,27 @@ class ImageEmbeddingConfig(BaseModel):
         ge=64,
         le=4096,
         description="Resize images to max dimension",
+    )
+
+
+class BackgroundProcessingConfig(BaseModel):
+    """Configuration for background job processing."""
+
+    max_concurrent_jobs: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Maximum number of concurrent ingestion jobs",
+    )
+    enable_image_indexing: bool = Field(
+        default=True,
+        description="Enable image extraction and CLIP embedding during ingestion",
+    )
+    max_images_per_doc: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum number of images to extract per document",
     )
 
 
@@ -87,6 +108,9 @@ class PipelineConfig(BaseModel):
 
     text_embedding: TextEmbeddingConfig = Field(default_factory=TextEmbeddingConfig)
     image_embedding: ImageEmbeddingConfig = Field(default_factory=ImageEmbeddingConfig)
+
+    # Background processing configuration
+    background: BackgroundProcessingConfig = Field(default_factory=BackgroundProcessingConfig)
 
     @field_validator("chunk_overlap")
     @classmethod

@@ -28,6 +28,7 @@ services:
       - "8000:8000"  # NyRAG API
     volumes:
       - nyrag-data:/app/data  # SQLite + uploads persistence
+      - nyrag-images:/app/data/images  # Extracted images persistence
       - ./configs:/app/configs:ro  # Config files (read-only)
     environment:
       - VESPA_URL=http://vespa:8080
@@ -50,4 +51,6 @@ volumes:
   vespa-data:
     driver: local
   nyrag-data:
+    driver: local
+  nyrag-images:
     driver: local

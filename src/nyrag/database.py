@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS data_sources (
     status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'indexed', 'failed')),
     progress INTEGER DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
     chunk_count INTEGER DEFAULT 0,
+    image_count INTEGER DEFAULT 0,
     error_message TEXT,
     metadata JSON
 );
@@ -87,6 +88,29 @@ CREATE INDEX IF NOT EXISTS idx_jobs_source_id ON jobs(source_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
+
+-- Image chunks for extracted images from documents
+CREATE TABLE IF NOT EXISTS image_chunks (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    file_path TEXT NOT NULL,
+    page_number INTEGER,
+    dimensions TEXT NOT NULL,  -- JSON: {"width": int, "height": int}
+    caption TEXT,
+    created_at TEXT NOT NULL,
+    indexed INTEGER DEFAULT 0,
+    FOREIGN KEY (source_id) REFERENCES data_sources(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_source ON image_chunks(source_id);
+CREATE INDEX IF NOT EXISTS idx_image_hash ON image_chunks(content_hash);
+"""
+
+# Migration SQL for existing databases (adds new columns if they don't exist)
+MIGRATION_SQL = """
+-- Add image_count column to data_sources if it doesn't exist
+-- SQLite doesn't support IF NOT EXISTS for columns, so we use a try/except in Python
 """
 
 
@@ -138,7 +162,26 @@ async def init_database(db_path: Optional[Path] = None) -> None:
         await db.executescript(SCHEMA_SQL)
         await db.commit()
 
+        # Run migrations for existing databases
+        await _run_migrations(db)
+
     logger.info("Database schema initialized successfully")
+
+
+async def _run_migrations(db: aiosqlite.Connection) -> None:
+    """Run database migrations for existing databases.
+
+    Adds new columns that may not exist in older database versions.
+    """
+    # Check if image_count column exists in data_sources
+    try:
+        cursor = await db.execute("SELECT image_count FROM data_sources LIMIT 1")
+        await cursor.fetchone()
+    except Exception:
+        # Column doesn't exist, add it
+        logger.info("Adding image_count column to data_sources table")
+        await db.execute("ALTER TABLE data_sources ADD COLUMN image_count INTEGER DEFAULT 0")
+        await db.commit()
 
 
 # =============================================================================
@@ -248,3 +291,198 @@ async def check_database_available() -> bool:
     except Exception as e:
         logger.warning(f"Database availability check failed: {e}")
         return False
+
+
+# =============================================================================
+# Image Chunk CRUD Operations
+# =============================================================================
+
+
+async def create_image_chunk(
+    image_id: str,
+    source_id: str,
+    content_hash: str,
+    file_path: str,
+    dimensions: dict,
+    page_number: int | None = None,
+    caption: str | None = None,
+) -> dict:
+    """Create a new image chunk record.
+
+    Args:
+        image_id: Unique ID for the image chunk
+        source_id: Parent data source ID
+        content_hash: SHA-256 hash of image content
+        file_path: Relative path in images directory
+        dimensions: Dict with 'width' and 'height' keys
+        page_number: Page number in source document (1-indexed)
+        caption: Optional image caption
+
+    Returns:
+        Created image chunk record as dict
+    """
+    import json
+    from datetime import datetime
+
+    async with get_db() as db:
+        await db.execute(
+            """
+            INSERT INTO image_chunks (id, source_id, content_hash, file_path, page_number, dimensions, caption, created_at, indexed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (
+                image_id,
+                source_id,
+                content_hash,
+                file_path,
+                page_number,
+                json.dumps(dimensions),
+                caption,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        await db.commit()
+
+    return {
+        "id": image_id,
+        "source_id": source_id,
+        "content_hash": content_hash,
+        "file_path": file_path,
+        "page_number": page_number,
+        "dimensions": dimensions,
+        "caption": caption,
+        "indexed": False,
+    }
+
+
+async def get_image_chunk(image_id: str) -> dict | None:
+    """Get an image chunk by ID.
+
+    Args:
+        image_id: UUID of the image chunk
+
+    Returns:
+        Image chunk record as dict, or None if not found
+    """
+    import json
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM image_chunks WHERE id = ?",
+            (image_id,),
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            result = dict(row)
+            result["dimensions"] = json.loads(result["dimensions"])
+            result["indexed"] = bool(result["indexed"])
+            return result
+        return None
+
+
+async def get_image_chunks_by_source(source_id: str) -> list[dict]:
+    """Get all image chunks for a data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        List of image chunk records
+    """
+    import json
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM image_chunks WHERE source_id = ? ORDER BY page_number, created_at",
+            (source_id,),
+        )
+        rows = await cursor.fetchall()
+
+        results = []
+        for row in rows:
+            result = dict(row)
+            result["dimensions"] = json.loads(result["dimensions"])
+            result["indexed"] = bool(result["indexed"])
+            results.append(result)
+        return results
+
+
+async def get_image_chunk_by_hash(content_hash: str) -> dict | None:
+    """Get an image chunk by content hash (for deduplication).
+
+    Args:
+        content_hash: SHA-256 hash of image content
+
+    Returns:
+        Image chunk record if exists, None otherwise
+    """
+    import json
+
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM image_chunks WHERE content_hash = ?",
+            (content_hash,),
+        )
+        row = await cursor.fetchone()
+
+        if row:
+            result = dict(row)
+            result["dimensions"] = json.loads(result["dimensions"])
+            result["indexed"] = bool(result["indexed"])
+            return result
+        return None
+
+
+async def mark_image_indexed(image_id: str) -> bool:
+    """Mark an image chunk as indexed in Vespa.
+
+    Args:
+        image_id: UUID of the image chunk
+
+    Returns:
+        True if updated, False if not found
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            "UPDATE image_chunks SET indexed = 1 WHERE id = ?",
+            (image_id,),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_image_chunks_by_source(source_id: str) -> int:
+    """Delete all image chunks for a data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Number of deleted records
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM image_chunks WHERE source_id = ?",
+            (source_id,),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def count_image_chunks_by_source(source_id: str) -> int:
+    """Count image chunks for a data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Number of image chunks
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) as count FROM image_chunks WHERE source_id = ?",
+            (source_id,),
+        )
+        row = await cursor.fetchone()
+        return row["count"] if row else 0

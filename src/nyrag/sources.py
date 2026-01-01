@@ -217,6 +217,7 @@ async def update_data_source(
     status: Optional[DataSourceStatus] = None,
     progress: Optional[int] = None,
     chunk_count: Optional[int] = None,
+    image_count: Optional[int] = None,
     error_message: Optional[str] = None,
 ) -> bool:
     """Update a data source's status and progress.
@@ -226,6 +227,7 @@ async def update_data_source(
         status: New status
         progress: New progress (0-100)
         chunk_count: New chunk count
+        image_count: New image count
         error_message: Error message (if failed)
 
     Returns:
@@ -245,6 +247,10 @@ async def update_data_source(
     if chunk_count is not None:
         updates.append("chunk_count = ?")
         params.append(chunk_count)
+
+    if image_count is not None:
+        updates.append("image_count = ?")
+        params.append(image_count)
 
     if error_message is not None:
         updates.append("error_message = ?")
@@ -461,14 +467,319 @@ def extract_name_from_path(path: str) -> str:
 
 
 # =============================================================================
+# Image Storage Functions
+# =============================================================================
+
+IMAGES_DIR = Path("data/images")
+
+
+def _get_content_hash(data: bytes) -> str:
+    """Generate SHA-256 hash of image content.
+
+    Args:
+        data: Raw image bytes
+
+    Returns:
+        64-character hex string (SHA-256 hash)
+    """
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _ensure_images_dir(source_id: str) -> Path:
+    """Ensure the images directory exists for a source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Path to the source's images directory
+    """
+    source_dir = IMAGES_DIR / source_id
+    source_dir.mkdir(parents=True, exist_ok=True)
+    return source_dir
+
+
+def save_image_to_disk(
+    source_id: str,
+    image_data: bytes,
+    format: str,
+) -> tuple[str, str]:
+    """Save an extracted image to disk.
+
+    Args:
+        source_id: UUID of the parent data source
+        image_data: Raw image bytes
+        format: Image format (png, jpg, etc.)
+
+    Returns:
+        Tuple of (relative_file_path, content_hash)
+    """
+    # Generate content hash for deduplication
+    content_hash = _get_content_hash(image_data)
+
+    # Use first 8 characters of hash as filename (unique enough)
+    hash_prefix = content_hash[:8]
+    filename = f"{hash_prefix}.{format}"
+
+    # Ensure directory exists
+    source_dir = _ensure_images_dir(source_id)
+
+    # Build paths
+    file_path = source_dir / filename
+    relative_path = f"{source_id}/{filename}"
+
+    # Check if file already exists (deduplication)
+    if file_path.exists():
+        logger.debug(f"Image already exists: {relative_path}")
+        return relative_path, content_hash
+
+    # Save image to disk
+    with open(file_path, "wb") as f:
+        f.write(image_data)
+
+    logger.debug(f"Saved image: {relative_path} ({len(image_data)} bytes)")
+    return relative_path, content_hash
+
+
+def get_image_path(source_id: str, filename: str) -> Path | None:
+    """Get the full path to an image file.
+
+    Args:
+        source_id: UUID of the data source
+        filename: Image filename
+
+    Returns:
+        Path to image file, or None if not found
+    """
+    file_path = IMAGES_DIR / source_id / filename
+    if file_path.exists():
+        return file_path
+    return None
+
+
+def delete_source_images(source_id: str) -> int:
+    """Delete all images for a data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Number of images deleted
+    """
+    import shutil
+
+    source_dir = IMAGES_DIR / source_id
+    if not source_dir.exists():
+        return 0
+
+    # Count files before deletion
+    count = sum(1 for _ in source_dir.iterdir() if _.is_file())
+
+    # Remove the entire directory
+    shutil.rmtree(source_dir, ignore_errors=True)
+
+    logger.info(f"Deleted {count} images for source {source_id}")
+    return count
+
+
+def get_image_dimensions(image_data: bytes) -> dict:
+    """Get dimensions of an image.
+
+    Args:
+        image_data: Raw image bytes
+
+    Returns:
+        Dict with 'width' and 'height' keys
+    """
+    try:
+        from PIL import Image
+        import io
+
+        img = Image.open(io.BytesIO(image_data))
+        width, height = img.size
+        return {"width": width, "height": height}
+    except Exception as e:
+        logger.warning(f"Could not get image dimensions: {e}")
+        return {"width": 0, "height": 0}
+
+
+async def process_extracted_images(
+    source_id: str,
+    images: list,
+    feeder,
+    pipeline_config,
+    job_id: str | None = None,
+    progress_callback=None,
+) -> tuple[int, int]:
+    """Process extracted images: save to disk, create DB records, embed and index.
+
+    Args:
+        source_id: UUID of the parent data source
+        images: List of ExtractedImage objects from document loader
+        feeder: VespaFeeder instance for indexing
+        pipeline_config: PipelineConfig for embeddings
+        job_id: Optional job ID for progress updates
+        progress_callback: Optional async callback(progress, task, log_line)
+
+    Returns:
+        Tuple of (success_count, failed_count)
+    """
+    import uuid
+    from nyrag.database import create_image_chunk, get_image_chunk_by_hash, mark_image_indexed
+    from nyrag.pipeline.embeddings import get_image_embedder
+
+    if not images:
+        return 0, 0
+
+    # Check if image indexing is enabled
+    if not pipeline_config.image_embedding.enabled:
+        logger.info("[IMAGE] Image embedding disabled, skipping image processing")
+        return 0, 0
+
+    # Apply max_images_per_doc limit
+    max_images = pipeline_config.background.max_images_per_doc
+    if len(images) > max_images:
+        logger.info(f"[IMAGE] Limiting to {max_images} images (found {len(images)})")
+        images = images[:max_images]
+
+    total_images = len(images)
+    success_count = 0
+    failed_count = 0
+
+    logger.info(f"[IMAGE] Processing {total_images} images for source {source_id}")
+
+    # Initialize image embedder
+    try:
+        image_embedder = get_image_embedder(pipeline_config)
+    except Exception as e:
+        logger.error(f"[IMAGE] Failed to initialize image embedder: {e}")
+        return 0, total_images
+
+    # Process images in batches
+    pil_images = []
+    image_metadata = []
+
+    for idx, img in enumerate(images):
+        try:
+            # Step 1: Save to disk
+            file_path, content_hash = save_image_to_disk(
+                source_id,
+                img.data,
+                img.format or "png",
+            )
+
+            # Step 2: Check for duplicate (already processed)
+            existing = await get_image_chunk_by_hash(content_hash)
+            if existing:
+                logger.debug(f"[IMAGE] Image {idx+1} already exists (hash: {content_hash[:8]})")
+                success_count += 1
+                continue
+
+            # Step 3: Get dimensions
+            dimensions = get_image_dimensions(img.data)
+
+            # Step 4: Generate unique ID
+            image_id = str(uuid.uuid4())
+
+            # Step 5: Create DB record
+            await create_image_chunk(
+                image_id=image_id,
+                source_id=source_id,
+                content_hash=content_hash,
+                file_path=file_path,
+                dimensions=dimensions,
+                page_number=img.page,
+                caption=img.alt_text,
+            )
+
+            # Step 6: Convert to PIL for embedding
+            try:
+                pil_img = img.to_pil_image()
+                pil_images.append(pil_img)
+                image_metadata.append({
+                    "image_id": image_id,
+                    "file_path": file_path,
+                    "page_number": img.page,
+                    "caption": img.alt_text,
+                })
+            except Exception as e:
+                logger.warning(f"[IMAGE] Could not convert image {idx+1} to PIL: {e}")
+                failed_count += 1
+                continue
+
+            if progress_callback and (idx + 1) % 5 == 0:
+                await progress_callback(
+                    progress=None,
+                    task=f"Processing image {idx+1}/{total_images}",
+                    log_line=f"Processed {idx+1} images",
+                )
+
+        except Exception as e:
+            logger.warning(f"[IMAGE] Failed to process image {idx+1}: {e}")
+            failed_count += 1
+            continue
+
+    # Step 7: Batch embed images
+    if pil_images:
+        try:
+            logger.info(f"[IMAGE] Generating CLIP embeddings for {len(pil_images)} images")
+            embeddings = image_embedder.embed_images(pil_images)
+
+            # Step 8: Index to Vespa
+            for meta, embedding in zip(image_metadata, embeddings):
+                try:
+                    # Feed image document to Vespa (unified schema)
+                    image_doc = {
+                        "id": meta["image_id"],
+                        "doc_type": "image",
+                        "image_id": meta["image_id"],
+                        "source_id": source_id,
+                        "image_embedding": {"values": embedding},
+                        "image_path": f"/api/images/{meta['file_path']}",
+                        "page_number": meta["page_number"] or 0,
+                    }
+
+                    # Feed to Vespa
+                    response = feeder.app.feed_data_point(
+                        schema=feeder.schema_name,
+                        data_id=meta["image_id"],
+                        fields=image_doc,
+                    )
+
+                    if feeder._is_success(response):
+                        await mark_image_indexed(meta["image_id"])
+                        success_count += 1
+                        logger.debug(f"[IMAGE] Indexed image {meta['image_id']}")
+                    else:
+                        logger.warning(f"[IMAGE] Failed to index image {meta['image_id']}")
+                        failed_count += 1
+
+                except Exception as e:
+                    logger.warning(f"[IMAGE] Failed to index image {meta['image_id']}: {e}")
+                    failed_count += 1
+
+        except Exception as e:
+            logger.error(f"[IMAGE] Failed to generate embeddings: {e}")
+            failed_count += len(pil_images)
+
+    logger.info(f"[IMAGE] Image processing complete: {success_count} succeeded, {failed_count} failed")
+    return success_count, failed_count
+
+
+# =============================================================================
 # Job CRUD Operations
 # =============================================================================
 
-# Maximum concurrent jobs
-MAX_CONCURRENT_JOBS = 2
-
 # In-memory tracking of running async tasks
 _running_tasks: dict = {}
+
+
+def _get_max_concurrent_jobs() -> int:
+    """Get max concurrent jobs from pipeline config."""
+    from nyrag.config import PipelineConfig
+    config = PipelineConfig()
+    return config.background.max_concurrent_jobs
 
 
 async def create_job(
@@ -1184,17 +1495,65 @@ async def _run_pdf_url_job(job_id: str, source: DataSourceResponse) -> None:
     if not feed_success:
         raise RuntimeError(f"Failed to index PDF document to Vespa: {url}")
 
+    # Get chunk count from feeder
+    chunk_count = getattr(feeder, '_last_chunk_count', 1)
+
+    # Process images if available and enabled
+    image_count = 0
+    if loaded_doc.images and pipeline_config.background.enable_image_indexing:
+        await update_job_progress(
+            job_id,
+            progress=75,
+            current_task=f"Processing {len(loaded_doc.images)} images...",
+            log_line=f"Found {len(loaded_doc.images)} images to process",
+        )
+
+        try:
+            success_count, failed_count = await process_extracted_images(
+                source_id=source.id,
+                images=loaded_doc.images,
+                feeder=feeder,
+                pipeline_config=pipeline_config,
+                job_id=job_id,
+            )
+            image_count = success_count
+
+            if failed_count > 0:
+                await update_job_progress(
+                    job_id,
+                    progress=90,
+                    current_task=f"Indexed {success_count} images ({failed_count} failed)",
+                    log_line=f"Image processing: {success_count} succeeded, {failed_count} failed",
+                )
+            else:
+                await update_job_progress(
+                    job_id,
+                    progress=90,
+                    current_task=f"Indexed {success_count} images",
+                    log_line=f"Successfully indexed {success_count} images",
+                )
+        except Exception as e:
+            logger.error(f"[IMAGE] Image processing failed: {e}")
+            await update_job_progress(
+                job_id,
+                progress=90,
+                current_task="Image processing failed",
+                log_line=f"Image processing error: {str(e)[:100]}",
+            )
+    elif loaded_doc.images and not pipeline_config.background.enable_image_indexing:
+        logger.info(f"[IMAGE] Skipping {len(loaded_doc.images)} images (image indexing disabled)")
+
     # Update source counts
-    await update_data_source(source.id, chunk_count=1)
+    await update_data_source(source.id, chunk_count=chunk_count, image_count=image_count)
 
     await update_job_progress(
         job_id,
         progress=95,
         current_task="Finalizing...",
-        log_line=f"Successfully indexed PDF document",
+        log_line=f"Successfully indexed PDF document with {chunk_count} chunks and {image_count} images",
     )
 
-    logger.info(f"PDF URL job {job_id} completed: 1 document indexed")
+    logger.info(f"PDF URL job {job_id} completed: 1 document, {chunk_count} chunks, {image_count} images")
 
 
 async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> None:
@@ -1309,8 +1668,9 @@ async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> N
         log_line=f"Successfully indexed document with {chunk_count} chunks",
     )
 
-    # Step 4: Handle images if any
-    if loaded_doc.images:
+    # Step 4: Handle images if image indexing is enabled
+    image_count = 0
+    if loaded_doc.images and pipeline_config.background.enable_image_indexing:
         await update_job_progress(
             job_id,
             progress=85,
@@ -1318,12 +1678,57 @@ async def _run_file_processing_job(job_id: str, source: DataSourceResponse) -> N
             log_line=f"Found {len(loaded_doc.images)} images to process",
         )
 
-        # Image indexing is handled by feed_images if enabled
-        # For now, just log that images were found
-        logger.info(f"Document has {len(loaded_doc.images)} images (image indexing available via feeder)")
+        # Process images: save to disk, embed with CLIP, index to Vespa
+        async def progress_cb(progress, task, log_line):
+            await update_job_progress(job_id, progress=progress, current_task=task, log_line=log_line)
 
-    # Update source with actual chunk count
-    await update_data_source(source.id, chunk_count=chunk_count)
+        try:
+            success_count, failed_count = await process_extracted_images(
+                source_id=source.id,
+                images=loaded_doc.images,
+                feeder=feeder,
+                pipeline_config=pipeline_config,
+                job_id=job_id,
+                progress_callback=progress_cb,
+            )
+            image_count = success_count
+
+            if failed_count > 0:
+                await update_job_progress(
+                    job_id,
+                    progress=90,
+                    current_task=f"Indexed {success_count} images ({failed_count} failed)",
+                    log_line=f"Image processing: {success_count} succeeded, {failed_count} failed",
+                )
+            else:
+                await update_job_progress(
+                    job_id,
+                    progress=90,
+                    current_task=f"Indexed {success_count} images",
+                    log_line=f"Successfully indexed {success_count} images",
+                )
+
+        except Exception as e:
+            # Image processing errors should not fail the entire job
+            logger.error(f"[IMAGE] Image processing failed: {e}")
+            await update_job_progress(
+                job_id,
+                progress=90,
+                current_task="Image processing failed",
+                log_line=f"Image processing error: {str(e)[:100]}",
+            )
+    elif loaded_doc.images and not pipeline_config.background.enable_image_indexing:
+        # Log that images were skipped due to config
+        logger.info(f"[IMAGE] Skipping {len(loaded_doc.images)} images (image indexing disabled)")
+        await update_job_progress(
+            job_id,
+            progress=90,
+            current_task="Skipping images (disabled)",
+            log_line=f"Found {len(loaded_doc.images)} images but image indexing is disabled",
+        )
+
+    # Update source with actual chunk count and image count
+    await update_data_source(source.id, chunk_count=chunk_count, image_count=image_count)
 
     await update_job_progress(
         job_id,
@@ -1347,9 +1752,10 @@ async def start_job(job_id: str) -> bool:
     import asyncio
 
     # Check if we're at capacity
+    max_jobs = _get_max_concurrent_jobs()
     running_count = await get_running_job_count()
-    if running_count >= MAX_CONCURRENT_JOBS:
-        logger.info(f"Job {job_id} queued - at capacity ({running_count}/{MAX_CONCURRENT_JOBS})")
+    if running_count >= max_jobs:
+        logger.info(f"Job {job_id} queued - at capacity ({running_count}/{max_jobs})")
         return False
 
     # Get the event loop and create task
@@ -1366,8 +1772,9 @@ async def start_job(job_id: str) -> bool:
 
 async def _try_start_next_job() -> None:
     """Try to start the next queued job if there's capacity."""
+    max_jobs = _get_max_concurrent_jobs()
     running_count = await get_running_job_count()
-    if running_count >= MAX_CONCURRENT_JOBS:
+    if running_count >= max_jobs:
         return
 
     queued_jobs = await get_queued_jobs()

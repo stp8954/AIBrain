@@ -551,6 +551,140 @@ function appendChunksCollapsible(chunks) {
   scrollToBottom();
 }
 
+// =============================================================================
+// Image Display Functions
+// =============================================================================
+
+function appendImagesSection(images, bubble) {
+  if (!images || !images.length) return;
+
+  const imagesSection = document.createElement("div");
+  imagesSection.className = "images-section";
+
+  const header = document.createElement("div");
+  header.className = "images-header";
+  header.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+      <circle cx="8.5" cy="8.5" r="1.5"></circle>
+      <polyline points="21 15 16 10 5 21"></polyline>
+    </svg>
+    <span>Related Images (${images.length})</span>
+  `;
+
+  const grid = document.createElement("div");
+  grid.className = "images-grid";
+
+  images.forEach((img) => {
+    const imgContainer = document.createElement("div");
+    imgContainer.className = "image-container";
+
+    const imgEl = document.createElement("img");
+    imgEl.className = "chat-image";
+    imgEl.src = img.url;
+    imgEl.alt = img.caption || "Related image";
+    imgEl.loading = "lazy";
+
+    // Handle image load error
+    imgEl.onerror = function () {
+      imgContainer.classList.add("image-error");
+      imgContainer.innerHTML = `
+        <div class="image-placeholder">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="9" y1="9" x2="15" y2="15"></line>
+            <line x1="15" y1="9" x2="9" y2="15"></line>
+          </svg>
+          <span>Image unavailable</span>
+        </div>
+      `;
+    };
+
+    // Click to open lightbox
+    imgEl.onclick = () => openImageLightbox(img);
+
+    imgContainer.appendChild(imgEl);
+
+    // Add caption/metadata if available
+    if (img.caption || img.page_number) {
+      const caption = document.createElement("div");
+      caption.className = "image-caption";
+      if (img.page_number) {
+        caption.textContent = `Page ${img.page_number}`;
+        if (img.caption) caption.textContent += ` - ${img.caption}`;
+      } else if (img.caption) {
+        caption.textContent = img.caption;
+      }
+      imgContainer.appendChild(caption);
+    }
+
+    grid.appendChild(imgContainer);
+  });
+
+  imagesSection.appendChild(header);
+  imagesSection.appendChild(grid);
+  bubble.appendChild(imagesSection);
+  scrollToBottom();
+}
+
+function openImageLightbox(img) {
+  // Create or get lightbox
+  let lightbox = document.getElementById("image-lightbox");
+  if (!lightbox) {
+    lightbox = document.createElement("div");
+    lightbox.id = "image-lightbox";
+    lightbox.className = "image-lightbox";
+    lightbox.innerHTML = `
+      <div class="lightbox-overlay"></div>
+      <div class="lightbox-content">
+        <button class="lightbox-close" aria-label="Close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+        <img class="lightbox-image" src="" alt="">
+        <div class="lightbox-info"></div>
+      </div>
+    `;
+    document.body.appendChild(lightbox);
+
+    // Close handlers
+    lightbox.querySelector(".lightbox-overlay").onclick = closeLightbox;
+    lightbox.querySelector(".lightbox-close").onclick = closeLightbox;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && lightbox.classList.contains("active")) {
+        closeLightbox();
+      }
+    });
+  }
+
+  // Set image
+  const lightboxImg = lightbox.querySelector(".lightbox-image");
+  lightboxImg.src = img.url;
+  lightboxImg.alt = img.caption || "Image";
+
+  // Set info
+  const infoEl = lightbox.querySelector(".lightbox-info");
+  let infoHtml = "";
+  if (img.page_number) infoHtml += `<span>Page ${img.page_number}</span>`;
+  if (img.caption) infoHtml += `<span>${escapeHtml(img.caption)}</span>`;
+  if (img.score) infoHtml += `<span>Relevance: ${(img.score * 100).toFixed(0)}%</span>`;
+  infoEl.innerHTML = infoHtml;
+
+  // Show lightbox
+  lightbox.classList.add("active");
+  document.body.style.overflow = "hidden";
+}
+
+function closeLightbox() {
+  const lightbox = document.getElementById("image-lightbox");
+  if (lightbox) {
+    lightbox.classList.remove("active");
+    document.body.style.overflow = "";
+  }
+}
+
 async function send() {
   const text = inputEl.value.trim();
   if (!text) return;
@@ -604,6 +738,8 @@ async function send() {
         hits: parseInt(hitsInput?.value) || 5,
         k: parseInt(kInput?.value) || 3,
         query_k: parseInt(queryKInput?.value) || 3,
+        include_images: true,
+        max_images: 3,
       }),
     });
 
@@ -718,6 +854,11 @@ async function send() {
 
             thinkingEl = null;
             thinkingContent = "";
+          } else if (evt.type === "images") {
+            // Store images and display them
+            if (evt.payload && evt.payload.length > 0) {
+              appendImagesSection(evt.payload, bubble);
+            }
           } else if (evt.type === "blog_job") {
             const { job_id, topic } = evt.payload;
             const tracker = createBlogJobTracker(job_id, topic);
