@@ -488,11 +488,16 @@ class DoclingDocumentLoader(DocumentLoader):
             pipeline_options.do_table_structure = self.docling_config.table_structure
             pipeline_options.images_scale = 2.0 if self.extract_images else 1.0
 
+        # Enable image generation for pictures and tables
+        if self.extract_images:
+            pipeline_options.generate_page_images = True
+            pipeline_options.generate_picture_images = True
+
         # Create converter with configured options
         self._converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
-            }
+            },
         )
 
         return self._converter
@@ -602,36 +607,72 @@ class DoclingDocumentLoader(DocumentLoader):
 
         try:
             if not hasattr(doc, 'pictures'):
+                logger.debug("Document has no 'pictures' attribute")
                 return images
+
+            logger.info(f"Found {len(doc.pictures)} pictures in document")
 
             for idx, picture in enumerate(doc.pictures):
                 try:
-                    # Get image data if available
-                    if hasattr(picture, 'image') and picture.image:
+                    # Try multiple ways to get image data from Docling picture
+                    image_bytes = None
+
+                    # Method 0: Try get_image() method (Docling 2.x API)
+                    if hasattr(picture, 'get_image'):
+                        try:
+                            from io import BytesIO
+                            pil_img = picture.get_image(doc)  # Pass document object
+                            if pil_img:
+                                buffer = BytesIO()
+                                pil_img.save(buffer, format='PNG')
+                                image_bytes = buffer.getvalue()
+                                logger.debug(f"Extracted image {idx} using get_image() method")
+                        except Exception as e:
+                            logger.debug(f"get_image() failed for picture {idx}: {e}")
+
+                    # Method 1: Direct image attribute
+                    if image_bytes is None and hasattr(picture, 'image') and picture.image is not None:
                         img_data = picture.image
                         if hasattr(img_data, 'tobytes'):
                             image_bytes = img_data.tobytes()
                         elif isinstance(img_data, bytes):
                             image_bytes = img_data
-                        else:
-                            continue
+                        elif hasattr(img_data, 'read'):  # File-like object
+                            image_bytes = img_data.read()
 
+                    # Method 2: Try to get from PIL Image if available
+                    if image_bytes is None and hasattr(picture, 'pil_image'):
+                        from io import BytesIO
+                        buffer = BytesIO()
+                        picture.pil_image.save(buffer, format='PNG')
+                        image_bytes = buffer.getvalue()
+
+                    # Method 3: Try data attribute
+                    if image_bytes is None and hasattr(picture, 'data'):
+                        image_bytes = picture.data
+
+                    if image_bytes:
                         images.append(
                             ExtractedImage(
                                 data=image_bytes,
                                 format="png",
-                                page=getattr(picture, 'page_no', None),
-                                alt_text=getattr(picture, 'caption', None),
+                                page=getattr(picture, 'page_no', None) or getattr(picture, 'page', None),
+                                alt_text=getattr(picture, 'caption', None) or getattr(picture, 'text', None),
                                 source_loc=source,
                                 metadata={"index": idx},
                             )
                         )
+                        logger.debug(f"Successfully extracted image {idx} ({len(image_bytes)} bytes)")
+                    else:
+                        logger.warning(f"Could not extract bytes from picture {idx} - available attrs: {dir(picture)}")
+
                 except Exception as e:
-                    logger.debug(f"Could not extract image {idx}: {e}")
+                    logger.warning(f"Could not extract image {idx}: {e}")
 
         except Exception as e:
-            logger.debug(f"Could not extract images from document: {e}")
+            logger.error(f"Could not extract images from document: {e}")
 
+        logger.info(f"Extracted {len(images)} images total")
         return images
 
     @classmethod

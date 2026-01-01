@@ -1,7 +1,7 @@
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
@@ -97,6 +97,41 @@ class VespaSchema:
                 Field(
                     name="indexed_at",
                     type="long",
+                    indexing=["attribute", "summary"],
+                ),
+                # Image indexing fields (for multimodal search)
+                Field(
+                    name="doc_type",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                    attribute=["fast-search"],
+                ),
+                Field(
+                    name="image_id",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                    attribute=["fast-search"],
+                ),
+                Field(
+                    name="source_id",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                    attribute=["fast-search"],
+                ),
+                Field(
+                    name="image_embedding",
+                    type="tensor<float>(x[512])",
+                    indexing=["attribute", "index"],
+                    attribute=["distance-metric: angular"],
+                ),
+                Field(
+                    name="image_path",
+                    type="string",
+                    indexing=["attribute", "summary"],
+                ),
+                Field(
+                    name="page_number",
+                    type="int",
                     indexing=["attribute", "summary"],
                 ),
             ]
@@ -226,6 +261,40 @@ class VespaSchema:
                 rank_properties=[("query(chunks).elementGap", "1")],
                 first_phase="sum(chunk_combined_scores())",
                 second_phase=SecondPhaseRanking(expression="best_chunk_score()", rerank_count=100),
+            )
+        )
+
+        # Add image search rank profile for CLIP embedding similarity
+        image_inputs = [
+            ("query(image_query_embedding)", "tensor<float>(x[512])"),
+        ]
+
+        image_functions = [
+            Function(
+                name="image_vec",
+                expression="attribute(image_embedding)",
+            ),
+            Function(
+                name="image_vector_norms",
+                expression="sqrt(sum(pow(t, 2), x))",
+                args=["t"],
+            ),
+            Function(
+                name="image_sim_score",
+                expression=(
+                    "reduce(query(image_query_embedding) * image_vec(), sum, x) / "
+                    "(image_vector_norms(image_vec()) * image_vector_norms(query(image_query_embedding)))"
+                ),
+            ),
+        ]
+
+        schema.add_rank_profile(
+            RankProfile(
+                name="image_search",
+                inputs=image_inputs,
+                functions=image_functions,
+                summary_features=["image_sim_score"],
+                first_phase="image_sim_score()",
             )
         )
 
@@ -568,6 +637,63 @@ class SystemStatusResponse(BaseModel):
     queued_jobs: int = PydanticField(..., description="Number of queued jobs")
     total_data_sources: int = PydanticField(..., description="Total number of data sources")
     total_conversations: int = PydanticField(..., description="Total number of conversations")
+
+
+# -----------------------------------------------------------------------------
+# Image Chunk Models
+# -----------------------------------------------------------------------------
+
+
+class ImageDimensions(BaseModel):
+    """Dimensions of an extracted image."""
+
+    width: int = PydanticField(..., gt=0, description="Image width in pixels")
+    height: int = PydanticField(..., gt=0, description="Image height in pixels")
+
+
+class ImageChunkCreate(BaseModel):
+    """Request model for creating an image chunk."""
+
+    source_id: str = PydanticField(..., min_length=1, description="Parent data source ID")
+    content_hash: str = PydanticField(..., min_length=64, max_length=64, description="SHA-256 hash of image content")
+    file_path: str = PydanticField(..., min_length=1, description="Relative path in images directory")
+    page_number: Optional[int] = PydanticField(None, ge=1, description="Page number in source document (1-indexed)")
+    dimensions: ImageDimensions = PydanticField(..., description="Image dimensions")
+    caption: Optional[str] = PydanticField(None, max_length=1024, description="Extracted or generated caption")
+
+
+class ImageChunkResponse(BaseModel):
+    """Response model for an image chunk."""
+
+    id: str = PydanticField(..., description="Unique image chunk ID")
+    source_id: str = PydanticField(..., description="Parent data source ID")
+    content_hash: str = PydanticField(..., description="SHA-256 hash of image content")
+    file_path: str = PydanticField(..., description="Relative path in images directory")
+    url: Optional[str] = PydanticField(None, description="Full URL to access the image")
+    page_number: Optional[int] = PydanticField(None, description="Page number in source document (1-indexed)")
+    dimensions: ImageDimensions = PydanticField(..., description="Image dimensions")
+    caption: Optional[str] = PydanticField(None, description="Extracted or generated caption")
+    created_at: datetime = PydanticField(..., description="When the image was extracted")
+    indexed: bool = PydanticField(False, description="Whether embedding is in Vespa index")
+
+
+class ImageChunkListResponse(BaseModel):
+    """Response model for listing image chunks."""
+
+    images: List[ImageChunkResponse]
+    total: int
+
+
+class RetrievedImage(BaseModel):
+    """An image retrieved during chat/search."""
+
+    id: str = PydanticField(..., description="Image chunk ID")
+    url: str = PydanticField(..., description="URL to access the image")
+    thumbnail_url: Optional[str] = PydanticField(None, description="URL for thumbnail version")
+    score: float = PydanticField(..., ge=0, le=1, description="Relevance score (0-1)")
+    source_document: str = PydanticField(..., description="Name of source document")
+    page_number: Optional[int] = PydanticField(None, description="Page in source document")
+    caption: Optional[str] = PydanticField(None, description="Image caption")
 
 
 # =============================================================================

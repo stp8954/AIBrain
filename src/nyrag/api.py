@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from functools import partial
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
@@ -1091,6 +1092,8 @@ class ChatRequest(BaseModel):
         description="Number of alternate search queries to generate with the LLM",
     )
     model: Optional[str] = Field(None, description="OpenRouter model id (optional, uses env default if set)")
+    include_images: bool = Field(False, description="Include relevant images in response")
+    max_images: int = Field(3, ge=0, le=10, description="Maximum number of images to return")
 
 
 def _fetch_chunks(query: str, hits: int, k: int) -> List[Dict[str, Any]]:
@@ -1173,6 +1176,104 @@ def _fetch_notes_as_chunks(query: str, hits: int) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"Failed to fetch notes: {e}")
         return []
+
+
+# Image embedder singleton (initialized lazily)
+_image_embedder = None
+
+
+def _get_image_embedder():
+    """Get or create the image embedder for CLIP-based image search."""
+    global _image_embedder
+    if _image_embedder is None:
+        try:
+            from nyrag.pipeline.embeddings import get_image_embedder
+
+            _image_embedder = get_image_embedder()
+            logger.info(f"Initialized image embedder: {_image_embedder.model_name}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize image embedder: {e}")
+            return None
+    return _image_embedder
+
+
+def _fetch_images(query: str, max_images: int = 3) -> List[Dict[str, Any]]:
+    """Fetch relevant images from Vespa using CLIP text embeddings.
+
+    Args:
+        query: Search query text
+        max_images: Maximum number of images to return
+
+    Returns:
+        List of image results with URLs and metadata
+    """
+    if max_images <= 0:
+        return []
+
+    embedder = _get_image_embedder()
+    if embedder is None:
+        logger.warning("Image embedder not available, skipping image search")
+        return []
+
+    try:
+        # Encode query text with CLIP
+        query_embedding = embedder.embed_text(query)
+
+        # Query Vespa for images using nearestNeighbor on image_embedding
+        # Using the unified schema with doc_type filter
+        # Note: Must use image_query_embedding to match the ranking profile input name
+        body = {
+            "yql": f"select * from sources * where doc_type contains 'image' and "
+            f"({{targetHits: {max_images}}}nearestNeighbor(image_embedding, image_query_embedding))",
+            "hits": max_images,
+            "ranking.profile": "image_search",
+            "input.query(image_query_embedding)": query_embedding,
+        }
+
+        vespa_response = vespa_app.query(body=body, schema=settings["schema_name"])
+        status_code = getattr(vespa_response, "status_code", 200)
+        if status_code >= 400:
+            logger.warning(f"Image search failed: {getattr(vespa_response, 'json', vespa_response)}")
+            return []
+
+        hits_data = vespa_response.json.get("root", {}).get("children", []) or []
+        images: List[Dict[str, Any]] = []
+
+        for hit in hits_data:
+            fields = hit.get("fields", {}) or {}
+            image_id = fields.get("image_id") or fields.get("id", "")
+            image_path = fields.get("image_path", "")
+            source_id = fields.get("source_id", "")
+            page_number = fields.get("page_number")
+            caption = fields.get("caption", "")
+            score = hit.get("relevance", 0.0)
+
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                score = 0.0
+
+            images.append({
+                "id": image_id,
+                "url": image_path,
+                "source_id": source_id,
+                "page_number": page_number,
+                "caption": caption,
+                "score": score,
+            })
+
+        logger.info(f"Image search found {len(images)} images for query: {query[:50]}...")
+        return images
+
+    except Exception as e:
+        logger.warning(f"Image search failed: {e}")
+        return []
+
+
+async def _fetch_images_async(query: str, max_images: int = 3) -> List[Dict[str, Any]]:
+    """Async wrapper for image search."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(_fetch_images, query, max_images))
 
 
 async def _fetch_chunks_async(query: str, hits: int, k: int) -> List[Dict[str, Any]]:
@@ -1424,14 +1525,47 @@ async def _fuse_chunks(queries: List[str], hits: int, k: int) -> Tuple[List[Dict
     return queries, fused
 
 
-async def _call_openrouter(context: List[Dict[str, str]], user_message: str, model_id: str) -> str:
-    system_prompt = (
-        "You are a helpful assistant. "
-        "Answer user's question using only the provided context. "
-        "Provide elaborate and informative answers where possible. "
-        "If the context is insufficient, say you don't know."
-    )
+async def _call_openrouter(
+    context: List[Dict[str, str]],
+    user_message: str,
+    model_id: str,
+    images: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, List[str]]:
+    """Call OpenRouter LLM with context and optional images.
+
+    Returns:
+        Tuple of (answer_text, selected_image_ids)
+    """
+    # Build system prompt based on whether images are available
+    if images:
+        system_prompt = (
+            "You are a helpful assistant. "
+            "Answer the user's question using only the provided context. "
+            "Provide elaborate and informative answers where possible. "
+            "If the context is insufficient, say you don't know.\n\n"
+            "IMAGES: You have access to relevant images. If any images would help illustrate "
+            "your answer, include them by writing [IMAGE:image_id] where image_id is the ID shown. "
+            "Only include images that are directly relevant to the question."
+        )
+    else:
+        system_prompt = (
+            "You are a helpful assistant. "
+            "Answer user's question using only the provided context. "
+            "Provide elaborate and informative answers where possible. "
+            "If the context is insufficient, say you don't know."
+        )
+
     context_text = "\n\n".join([f"[{c.get('loc','')}] {c.get('chunk','')}" for c in context])
+
+    # Add image information to context if available
+    if images:
+        image_info = "\n\nAvailable Images:\n"
+        for img in images:
+            caption = img.get('caption', '') or 'No caption'
+            score = img.get('score', 0)
+            image_info += f"- ID: {img['id']} | Relevance: {score:.2f} | Caption: {caption}\n"
+        context_text += image_info
+
     messages = [
         {"role": "system", "content": system_prompt},
         {
@@ -1450,7 +1584,12 @@ async def _call_openrouter(context: List[Dict[str, str]], user_message: str, mod
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    return _extract_message_text(resp.choices[0].message.content)
+    answer_text = _extract_message_text(resp.choices[0].message.content)
+
+    # Extract selected image IDs from the response (format: [IMAGE:uuid])
+    selected_ids = re.findall(r'\[IMAGE:([a-f0-9-]+)\]', answer_text)
+
+    return answer_text, selected_ids
 
 
 async def _openrouter_stream(
@@ -1458,12 +1597,33 @@ async def _openrouter_stream(
     user_message: str,
     model_id: str,
     history: Optional[List[Dict[str, str]]] = None,
+    images: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncGenerator[Tuple[str, str], None]:
-    system_prompt = (
-        "You are a helpful assistant. Answer using only the provided context. "
-        "If the context is insufficient, say you don't know."
-    )
+    # Build system prompt based on whether images are available
+    if images:
+        system_prompt = (
+            "You are a helpful assistant. Answer using only the provided context. "
+            "If the context is insufficient, say you don't know.\n\n"
+            "IMAGES: You have access to relevant images. If any images would help illustrate "
+            "your answer, include them by writing [IMAGE:image_id] where image_id is the ID shown. "
+            "Only include images that are directly relevant to the question."
+        )
+    else:
+        system_prompt = (
+            "You are a helpful assistant. Answer using only the provided context. "
+            "If the context is insufficient, say you don't know."
+        )
+
     context_text = "\n\n".join([f"[{c.get('loc','')}] {c.get('chunk','')}" for c in context])
+
+    # Add image information to context if available
+    if images:
+        image_info = "\n\nAvailable Images:\n"
+        for img in images:
+            caption = img.get('caption', '') or 'No caption'
+            score = img.get('score', 0)
+            image_info += f"- ID: {img['id']} | Relevance: {score:.2f} | Caption: {caption}\n"
+        context_text += image_info
 
     messages = [{"role": "system", "content": system_prompt}]
 
@@ -1511,9 +1671,25 @@ async def chat(req: ChatRequest) -> Dict[str, Any]:
         k=req.k,
     )
     if not chunks:
-        return {"answer": "No relevant context found.", "chunks": []}
-    answer = await _call_openrouter(chunks, req.message, model_id)
-    return {"answer": answer, "chunks": chunks, "queries": queries}
+        return {"answer": "No relevant context found.", "chunks": [], "images": []}
+
+    # Fetch images BEFORE calling LLM so it can select relevant ones
+    all_images = []
+    if req.include_images and req.max_images > 0:
+        all_images = await _fetch_images_async(req.message, req.max_images)
+
+    # Call LLM with images context
+    answer, selected_image_ids = await _call_openrouter(
+        chunks, req.message, model_id, images=all_images
+    )
+
+    # Filter to only LLM-selected images, or return all if none selected
+    if selected_image_ids:
+        images = [img for img in all_images if img['id'] in selected_image_ids]
+    else:
+        images = all_images
+
+    return {"answer": answer, "chunks": chunks, "queries": queries, "images": images}
 
 
 @app.post("/chat-stream")
@@ -1583,12 +1759,36 @@ async def chat_stream(req: ChatRequest):
         yield f"data: {json.dumps({'type': 'status', 'payload': 'Retrieving context from Vespa...'})}\n\n"
         queries, chunks = await _fuse_chunks(queries, hits=req.hits, k=req.k)
         yield f"data: {json.dumps({'type': 'chunks', 'payload': chunks})}\n\n"
+
+        # Fetch images BEFORE calling LLM so it can reference them
+        images = []
+        if req.include_images and req.max_images > 0:
+            yield f"data: {json.dumps({'type': 'status', 'payload': 'Searching for relevant images...'})}\n\n"
+            images = await _fetch_images_async(req.message, req.max_images)
+
         if not chunks:
             yield f"data: {json.dumps({'type': 'done', 'payload': 'No relevant context found.'})}\n\n"
             return
+
         yield f"data: {json.dumps({'type': 'status', 'payload': 'Generating answer...'})}\n\n"
-        async for type_, payload in _openrouter_stream(chunks, req.message, model_id, req.history):
+
+        # Stream response, collecting full text to extract selected images
+        full_response = ""
+        async for type_, payload in _openrouter_stream(chunks, req.message, model_id, req.history, images=images):
             yield f"data: {json.dumps({'type': type_, 'payload': payload})}\n\n"
+            if type_ == "token":
+                full_response += payload
+
+        # Extract selected image IDs from response and send filtered images
+        selected_ids = re.findall(r'\[IMAGE:([a-f0-9-]+)\]', full_response)
+        if selected_ids:
+            selected_images = [img for img in images if img['id'] in selected_ids]
+        else:
+            selected_images = images  # Fall back to all if none selected
+
+        if selected_images:
+            yield f"data: {json.dumps({'type': 'images', 'payload': selected_images})}\n\n"
+
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
@@ -1974,3 +2174,370 @@ async def download_blog(blog_id: str):
         filename=f"blog-{blog_id}.md",
         media_type="text/markdown",
     )
+
+
+# =============================================================================
+# Image API Endpoints (Phase 4 - Image Retrieval)
+# =============================================================================
+
+
+@app.get("/api/images/{source_id}/{filename}")
+async def serve_image(source_id: str, filename: str):
+    """Serve an extracted image file.
+
+    Args:
+        source_id: UUID of the data source
+        filename: Image filename (hash.format)
+
+    Returns:
+        Image file with appropriate content-type
+
+    Raises:
+        HTTPException: 404 if image not found
+    """
+    from nyrag.sources import get_image_path
+
+    image_path = get_image_path(source_id, filename)
+
+    if not image_path or not image_path.exists():
+        raise HTTPException(status_code=404, detail=f"Image not found: {source_id}/{filename}")
+
+    # Determine content type from file extension
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    content_type_map = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "bmp": "image/bmp",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+    }
+    content_type = content_type_map.get(ext, "application/octet-stream")
+
+    return FileResponse(
+        path=str(image_path),
+        media_type=content_type,
+        filename=filename,
+    )
+
+
+@app.get("/api/sources/{source_id}/images")
+async def list_source_images(source_id: str) -> Dict[str, Any]:
+    """List all images for a data source.
+
+    Args:
+        source_id: UUID of the data source
+
+    Returns:
+        Dictionary with images list
+
+    Raises:
+        HTTPException: 404 if source not found
+    """
+    from nyrag.database import get_image_chunks_by_source
+    from nyrag.sources import get_data_source
+
+    # Verify source exists
+    source = await get_data_source(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail=f"Data source not found: {source_id}")
+
+    # Get all images for this source
+    images = await get_image_chunks_by_source(source_id)
+
+    # Transform to API response format with URLs
+    image_list = []
+    for img in images:
+        filename = img.get("file_path", "").split("/")[-1] if img.get("file_path") else ""
+        image_list.append({
+            "id": img.get("id"),
+            "url": f"/api/images/{source_id}/{filename}" if filename else None,
+            "page_number": img.get("page_number"),
+            "dimensions": img.get("dimensions"),
+            "caption": img.get("caption"),
+            "indexed": img.get("indexed", False),
+            "created_at": img.get("created_at"),
+        })
+
+    return {
+        "source_id": source_id,
+        "source_name": source.name,
+        "total": len(image_list),
+        "images": image_list,
+    }
+
+
+# =============================================================================
+# Retrieval Quality Testing API Endpoints (Phase 5)
+# =============================================================================
+
+
+class TestCaseResult(BaseModel):
+    """Result of a single test case execution."""
+
+    id: str
+    query: str
+    passed: bool
+    precision: float = 0.0
+    recall: float = 0.0
+    mrr: float = 0.0
+    chunks_retrieved: int = 0
+    images_retrieved: int = 0
+    keywords_found: int = 0
+    keywords_expected: int = 0
+    error: Optional[str] = None
+
+
+class TestSuiteResult(BaseModel):
+    """Result of running a test suite."""
+
+    total_cases: int
+    passed: int
+    failed: int
+    skipped: int
+    avg_precision: float
+    avg_recall: float
+    avg_mrr: float
+    results: List[TestCaseResult]
+    run_time_ms: int
+
+
+class RunTestsRequest(BaseModel):
+    """Request to run retrieval tests."""
+
+    tags: Optional[List[str]] = Field(None, description="Filter test cases by tags")
+    top_k: int = Field(5, ge=1, le=20, description="Number of results to retrieve")
+    include_images: bool = Field(True, description="Include image retrieval tests")
+    test_type: Optional[str] = Field(None, description="Filter by test type: 'text', 'image', or 'hybrid'")
+
+
+@app.post("/api/test/retrieval")
+async def run_retrieval_tests(req: RunTestsRequest) -> TestSuiteResult:
+    """Run retrieval quality tests and return results.
+
+    This endpoint executes test cases from the YAML test files and
+    validates that the retrieval system meets quality thresholds.
+
+    Args:
+        req: Test configuration including filters and parameters
+
+    Returns:
+        TestSuiteResult with pass/fail status and metrics summary
+    """
+    import time
+    from pathlib import Path
+
+    import yaml
+
+    start_time = time.time()
+
+    # Load test cases
+    test_cases_dir = Path(__file__).parent.parent.parent / "tests" / "data" / "test_cases"
+    text_cases = []
+    image_cases = []
+
+    text_yaml = test_cases_dir / "text_retrieval.yaml"
+    if text_yaml.exists():
+        with open(text_yaml) as f:
+            text_cases = yaml.safe_load(f) or []
+
+    image_yaml = test_cases_dir / "image_retrieval.yaml"
+    if image_yaml.exists():
+        with open(image_yaml) as f:
+            image_cases = yaml.safe_load(f) or []
+
+    # Combine and filter cases
+    all_cases = []
+    if req.test_type in (None, "text"):
+        all_cases.extend(text_cases)
+    if req.test_type in (None, "image", "hybrid") and req.include_images:
+        all_cases.extend(image_cases)
+
+    # Filter by tags if specified
+    if req.tags:
+        all_cases = [
+            c for c in all_cases if any(tag in c.get("tags", []) for tag in req.tags)
+        ]
+
+    results: List[TestCaseResult] = []
+    passed = 0
+    failed = 0
+    skipped = 0
+    precision_sum = 0.0
+    recall_sum = 0.0
+    mrr_sum = 0.0
+
+    for case in all_cases:
+        case_id = case.get("id", "unknown")
+        query = case.get("query", "")
+        top_k = case.get("top_k", req.top_k)
+        min_precision = case.get("min_precision", 0.0)
+        min_recall = case.get("min_recall", 0.0)
+        max_precision = case.get("max_precision", 1.0)
+        expected_keywords = case.get("expected_content_keywords", [])
+        include_images = case.get("include_images", False)
+        max_images = case.get("max_images", 3)
+
+        try:
+            # Execute search
+            embedding = model.encode(query, convert_to_numpy=True).tolist()
+            body = {
+                "yql": "select * from sources * where userInput(@query)",
+                "query": query,
+                "hits": top_k * 2,
+                "summary": DEFAULT_SUMMARY,
+                "ranking.profile": DEFAULT_RANKING,
+                "input.query(embedding)": embedding,
+                "input.query(k)": top_k,
+            }
+            vespa_response = vespa_app.query(body=body, schema=settings["schema_name"])
+            hits_data = vespa_response.json.get("root", {}).get("children", []) or []
+
+            # Extract chunks
+            chunks = []
+            for hit in hits_data:
+                fields = hit.get("fields", {}) or {}
+                chunk_texts = fields.get("chunks_topk") or []
+                for chunk in chunk_texts:
+                    chunks.append(chunk)
+
+            # Get images if requested
+            images = []
+            if include_images:
+                images = await _fetch_images_async(query, max_images)
+
+            # Calculate metrics based on keyword matching
+            content = " ".join(chunks).lower()
+            keywords_found = sum(1 for kw in expected_keywords if kw.lower() in content)
+            keywords_expected = len(expected_keywords)
+
+            if keywords_expected > 0:
+                keyword_precision = keywords_found / keywords_expected
+                keyword_recall = keywords_found / keywords_expected
+            else:
+                keyword_precision = 1.0 if len(chunks) > 0 else 0.0
+                keyword_recall = keyword_precision
+
+            # MRR: 1 if any keyword found in first result
+            mrr = 1.0 if keywords_found > 0 else 0.0
+
+            # Determine pass/fail
+            test_passed = True
+            if min_precision > 0 and keyword_precision < min_precision * 0.5:
+                test_passed = False
+            if min_recall > 0 and keyword_recall < min_recall * 0.5:
+                test_passed = False
+            if max_precision < 1.0 and keyword_precision > max_precision:
+                test_passed = False
+
+            result = TestCaseResult(
+                id=case_id,
+                query=query,
+                passed=test_passed,
+                precision=keyword_precision,
+                recall=keyword_recall,
+                mrr=mrr,
+                chunks_retrieved=len(chunks),
+                images_retrieved=len(images),
+                keywords_found=keywords_found,
+                keywords_expected=keywords_expected,
+            )
+
+            if test_passed:
+                passed += 1
+            else:
+                failed += 1
+
+            precision_sum += keyword_precision
+            recall_sum += keyword_recall
+            mrr_sum += mrr
+
+        except Exception as e:
+            result = TestCaseResult(
+                id=case_id,
+                query=query,
+                passed=False,
+                error=str(e),
+            )
+            skipped += 1
+
+        results.append(result)
+
+    # Calculate averages
+    total = len(results)
+    avg_precision = precision_sum / total if total > 0 else 0.0
+    avg_recall = recall_sum / total if total > 0 else 0.0
+    avg_mrr = mrr_sum / total if total > 0 else 0.0
+
+    run_time_ms = int((time.time() - start_time) * 1000)
+
+    return TestSuiteResult(
+        total_cases=total,
+        passed=passed,
+        failed=failed,
+        skipped=skipped,
+        avg_precision=avg_precision,
+        avg_recall=avg_recall,
+        avg_mrr=avg_mrr,
+        results=results,
+        run_time_ms=run_time_ms,
+    )
+
+
+@app.get("/api/test/cases")
+async def list_test_cases(
+    test_type: Optional[str] = None,
+    tags: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List available test cases.
+
+    Args:
+        test_type: Filter by type ('text', 'image', 'hybrid')
+        tags: Comma-separated list of tags to filter by
+
+    Returns:
+        Dictionary with test cases grouped by type
+    """
+    from pathlib import Path
+
+    import yaml
+
+    test_cases_dir = Path(__file__).parent.parent.parent / "tests" / "data" / "test_cases"
+
+    result = {
+        "text_cases": [],
+        "image_cases": [],
+        "total": 0,
+    }
+
+    # Parse tags
+    tag_filter = tags.split(",") if tags else None
+
+    # Load text cases
+    text_yaml = test_cases_dir / "text_retrieval.yaml"
+    if text_yaml.exists() and test_type in (None, "text"):
+        with open(text_yaml) as f:
+            cases = yaml.safe_load(f) or []
+            if tag_filter:
+                cases = [c for c in cases if any(t in c.get("tags", []) for t in tag_filter)]
+            result["text_cases"] = [
+                {"id": c.get("id"), "query": c.get("query"), "tags": c.get("tags", [])}
+                for c in cases
+            ]
+
+    # Load image cases
+    image_yaml = test_cases_dir / "image_retrieval.yaml"
+    if image_yaml.exists() and test_type in (None, "image", "hybrid"):
+        with open(image_yaml) as f:
+            cases = yaml.safe_load(f) or []
+            if tag_filter:
+                cases = [c for c in cases if any(t in c.get("tags", []) for t in tag_filter)]
+            result["image_cases"] = [
+                {"id": c.get("id"), "query": c.get("query"), "tags": c.get("tags", [])}
+                for c in cases
+            ]
+
+    result["total"] = len(result["text_cases"]) + len(result["image_cases"])
+    return result

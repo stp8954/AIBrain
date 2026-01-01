@@ -19,7 +19,10 @@ const sourcesState = {
   },
   selectedFiles: [],
   isLoading: false,
-  deleteSourceId: null
+  deleteSourceId: null,
+  // Job tracking state
+  activeJobs: new Map(), // job_id -> { eventSource, progress, status, sourceName }
+  jobsContainer: null
 };
 
 // =============================================================================
@@ -126,6 +129,220 @@ async function deleteSource(sourceId) {
   }
 
   return response.json();
+}
+
+async function fetchActiveJobs() {
+  const response = await fetch('/api/jobs?status=running&limit=10');
+  if (!response.ok) return { jobs: [] };
+  return response.json();
+}
+
+async function fetchQueuedJobs() {
+  const response = await fetch('/api/jobs?status=queued&limit=10');
+  if (!response.ok) return { jobs: [] };
+  return response.json();
+}
+
+// =============================================================================
+// Job Progress Tracking
+// =============================================================================
+
+function createJobsContainer() {
+  if (sourcesState.jobsContainer) return sourcesState.jobsContainer;
+
+  const container = document.createElement('div');
+  container.id = 'active-jobs-container';
+  container.className = 'active-jobs-container';
+  container.innerHTML = `
+    <div class="active-jobs-header">
+      <h3>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        Active Jobs
+      </h3>
+    </div>
+    <div id="active-jobs-list" class="active-jobs-list"></div>
+  `;
+
+  // Insert after filters bar
+  const filtersBar = document.querySelector('.filters-bar');
+  if (filtersBar) {
+    filtersBar.after(container);
+  }
+
+  sourcesState.jobsContainer = container;
+  return container;
+}
+
+function renderJobItem(jobId, data) {
+  const { progress = 0, status = 'queued', currentTask = '', sourceName = 'Unknown' } = data;
+
+  const statusIcons = {
+    queued: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>',
+    running: '<span class="spinner-xs"></span>',
+    completed: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>',
+    failed: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>'
+  };
+
+  return `
+    <div class="job-item" data-job-id="${jobId}">
+      <div class="job-info">
+        <div class="job-status">${statusIcons[status] || statusIcons.queued}</div>
+        <div class="job-details">
+          <span class="job-name">${escapeHtml(sourceName)}</span>
+          <span class="job-task">${escapeHtml(currentTask || status)}</span>
+        </div>
+      </div>
+      <div class="job-progress">
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: ${progress}%"></div>
+        </div>
+        <span class="progress-text">${progress}%</span>
+      </div>
+    </div>
+  `;
+}
+
+function updateJobsUI() {
+  const container = document.getElementById('active-jobs-list');
+  if (!container) return;
+
+  if (sourcesState.activeJobs.size === 0) {
+    // Hide the jobs container when no active jobs
+    if (sourcesState.jobsContainer) {
+      sourcesState.jobsContainer.style.display = 'none';
+    }
+    return;
+  }
+
+  // Show the container
+  if (sourcesState.jobsContainer) {
+    sourcesState.jobsContainer.style.display = 'block';
+  }
+
+  // Render all active jobs
+  let html = '';
+  sourcesState.activeJobs.forEach((data, jobId) => {
+    html += renderJobItem(jobId, data);
+  });
+  container.innerHTML = html;
+}
+
+function startJobTracking(jobId, sourceName) {
+  // Don't track if already tracking
+  if (sourcesState.activeJobs.has(jobId)) return;
+
+  // Create jobs container if not exists
+  createJobsContainer();
+
+  // Initialize job state
+  sourcesState.activeJobs.set(jobId, {
+    eventSource: null,
+    progress: 0,
+    status: 'queued',
+    currentTask: 'Starting...',
+    sourceName: sourceName || 'Processing...'
+  });
+  updateJobsUI();
+
+  // Connect to SSE stream
+  const eventSource = new EventSource(`/api/jobs/${jobId}/stream`);
+
+  eventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const jobData = sourcesState.activeJobs.get(jobId);
+      if (jobData) {
+        jobData.progress = data.progress || 0;
+        jobData.status = data.status || 'running';
+        jobData.currentTask = data.current_task || '';
+        updateJobsUI();
+      }
+    } catch (e) {
+      console.error('Failed to parse job progress:', e);
+    }
+  };
+
+  eventSource.addEventListener('complete', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const jobData = sourcesState.activeJobs.get(jobId);
+      const name = jobData?.sourceName || 'Source';
+
+      // Close SSE connection
+      eventSource.close();
+
+      // Remove from active jobs
+      sourcesState.activeJobs.delete(jobId);
+      updateJobsUI();
+
+      // Show notification
+      if (data.status === 'completed') {
+        showToast(`${name} indexed successfully!`, 'success');
+      } else if (data.status === 'failed') {
+        showToast(`${name} failed to process`, 'error');
+      } else if (data.status === 'cancelled') {
+        showToast(`${name} was cancelled`, 'warning');
+      }
+
+      // Refresh sources list
+      loadSources();
+    } catch (e) {
+      console.error('Failed to handle job completion:', e);
+    }
+  });
+
+  eventSource.addEventListener('error', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      showToast(data.error || 'Job tracking error', 'error');
+    } catch (e) {
+      // SSE connection error
+    }
+    eventSource.close();
+    sourcesState.activeJobs.delete(jobId);
+    updateJobsUI();
+  });
+
+  eventSource.onerror = () => {
+    // SSE connection lost - could be normal closure or error
+    eventSource.close();
+    sourcesState.activeJobs.delete(jobId);
+    updateJobsUI();
+    // Refresh sources to see current state
+    loadSources();
+  };
+
+  // Store eventSource reference
+  const jobData = sourcesState.activeJobs.get(jobId);
+  if (jobData) {
+    jobData.eventSource = eventSource;
+  }
+}
+
+async function resumeActiveJobTracking() {
+  // Fetch running and queued jobs
+  try {
+    const [runningData, queuedData] = await Promise.all([
+      fetchActiveJobs(),
+      fetchQueuedJobs()
+    ]);
+
+    const allJobs = [...(runningData.jobs || []), ...(queuedData.jobs || [])];
+
+    if (allJobs.length > 0) {
+      createJobsContainer();
+      allJobs.forEach(job => {
+        if (!sourcesState.activeJobs.has(job.id)) {
+          startJobTracking(job.id, job.source_name || 'Processing...');
+        }
+      });
+    }
+  } catch (e) {
+    console.error('Failed to resume job tracking:', e);
+  }
 }
 
 // =============================================================================
@@ -323,8 +540,13 @@ async function handleSubmit() {
         return;
       }
 
-      await addUrlSource(url, name);
-      showToast('Source added successfully!', 'success');
+      const result = await addUrlSource(url, name);
+      showToast('Processing in background...', 'info');
+
+      // Start tracking the job
+      if (result.job_id) {
+        startJobTracking(result.job_id, result.source?.name || name || url);
+      }
     } else {
       if (sourcesState.selectedFiles.length === 0) {
         showToast('Please select at least one file', 'error');
@@ -333,9 +555,18 @@ async function handleSubmit() {
 
       const result = await uploadFiles(sourcesState.selectedFiles);
       if (result.errors?.length > 0) {
-        showToast(`${result.sources.length} files added, ${result.errors.length} failed`, 'warning');
+        showToast(`${result.sources.length} files queued, ${result.errors.length} failed`, 'warning');
       } else {
-        showToast(`${result.sources.length} file(s) added successfully!`, 'success');
+        showToast(`${result.sources.length} file(s) processing in background...`, 'info');
+      }
+
+      // Start tracking all jobs
+      if (result.sources) {
+        result.sources.forEach(item => {
+          if (item.job_id) {
+            startJobTracking(item.job_id, item.source?.name || 'Processing...');
+          }
+        });
       }
     }
 
@@ -479,6 +710,9 @@ function debounce(func, wait) {
 document.addEventListener('DOMContentLoaded', () => {
   // Initial load
   loadSources();
+
+  // Resume tracking any active jobs (Task 2.6: persist state across refresh)
+  resumeActiveJobTracking();
 
   // Add source buttons
   elements.addSourceBtn?.addEventListener('click', openAddModal);

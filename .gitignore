@@ -138,3 +138,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/data/
+
+# NyRAG specific
+data/images/*
+!data/images/.gitkeep
+data/nyrag.db
+data/nyrag.db-wal
+data/nyrag.db-shm

@@ -478,10 +478,150 @@
   display: inline-flex;
 }
 
+/* =============================================================================
+   Active Jobs Container (Background Processing Progress)
+   ============================================================================= */
+
+.active-jobs-container {
+  margin-bottom: var(--spacing-lg);
+  background: var(--surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.active-jobs-header {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--background);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.active-jobs-header h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.active-jobs-header svg {
+  color: var(--primary);
+}
+
+.active-jobs-list {
+  padding: var(--spacing-sm);
+}
+
+.job-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--background);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--spacing-xs);
+}
+
+.job-item:last-child {
+  margin-bottom: 0;
+}
+
+.job-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex: 1;
+  min-width: 0;
+}
+
+.job-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.job-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.job-name {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-task {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-shrink: 0;
+  width: 150px;
+}
+
+.progress-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--border-color);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.progress-text {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Spinner for processing status */
+.spinner-xs {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--primary);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .sources-page {
     padding: var(--spacing-md);
+  }
+
+  .job-progress {
+    width: 100px;
+  }
+
+  .job-task {
+    display: none;
   }
 
   .page-header {
